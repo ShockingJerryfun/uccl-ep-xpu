@@ -13,7 +13,8 @@ namespace cg = cooperative_groups;
 namespace uccl {
 namespace internode_ll {
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
 constexpr int kNumMaxWarpGroups = 16;
 #else
 constexpr int kNumMaxWarpGroups = 32;
@@ -121,6 +122,12 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   // initialize barrier
   amd::barrier_init(1);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  for (int i = thread_id; i < MAX_NUM_BARRIERS; i += blockDim.x) {
+    metax::barrier_count[i] = 0;
+    metax::barrier_phase[i] = 0;
+  }
+  __syncthreads();
 #endif
 
   // Sending phase
@@ -192,7 +199,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
 
           // Reduce amax and scale
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
           EP_STATIC_ASSERT(kNumElemsPerRead * WARP_SIZE / kNumPerChannels == 4,
                            "Invalid vectorization");
           amax = warp_reduce_max<16>(amax);
@@ -426,6 +434,8 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
            FINISHED_SUM_TAG * 2)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
       __builtin_amdgcn_s_sleep(1);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+      asm volatile("snop 0");
 #else
       ;
 #endif
@@ -511,7 +521,8 @@ LOW_LATENCY_DISPATCH_RECV:
     // NOTES: using sub-warp 1 to overlap with sub-warp 0
     int num_recv_tokens_internode = 0, num_recv_tokens_ipc = 0,
         num_recv_tokens = 0, recv_token_begin_idx = 0;
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     EP_DEVICE_ASSERT(num_warps_per_group > 1);
 #else
     EP_DEVICE_ASSERT(num_warps_per_group > 1 and num_warp_groups < 15);
@@ -524,8 +535,10 @@ LOW_LATENCY_DISPATCH_RECV:
                  0)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
         __builtin_amdgcn_s_sleep(1);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+        asm volatile("snop 0");
 #else
-        ;
+          ;
 #endif
 
       while ((src_rank / max_nvl_peers != rank / max_nvl_peers) &&
@@ -536,8 +549,10 @@ LOW_LATENCY_DISPATCH_RECV:
                           local_expert_idx * num_ranks + src_rank)))) == 0)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
         __builtin_amdgcn_s_sleep(1);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+        asm volatile("snop 0");
 #else
-        ;
+          ;
 #endif
 
       if (src_rank / max_nvl_peers == rank / max_nvl_peers) {
@@ -726,7 +741,8 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
         rdma_recv_count_internode, grid_sync_barrier_ptr);                 \
   }                                                                        \
   break
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   EP_HOST_ASSERT(num_warps * WARP_SIZE <= MAX_NTHREADS);
 #endif
 
@@ -781,6 +797,14 @@ __global__ __launch_bounds__(1024, 1) void combine(
   constexpr size_t num_bytes_per_slot = kHidden * sizeof(nv_bfloat16);
   EP_STATIC_ASSERT(num_bytes_per_slot % sizeof(int4) == 0,
                    "Invalid vectorization");
+
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  for (int i = thread_id; i < MAX_NUM_BARRIERS; i += blockDim.x) {
+    metax::barrier_count[i] = 0;
+    metax::barrier_phase[i] = 0;
+  }
+  __syncthreads();
+#endif
 
   // Sending phase
   if ((phases & LOW_LATENCY_SEND_PHASE) == 0) goto LOW_LATENCY_COMBINE_RECV;
@@ -1056,6 +1080,8 @@ __global__ __launch_bounds__(1024, 1) void combine(
       while (ld_acquire_global<kUseAggressiveAtomic>(atomic_clean_flag) == 0)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
         __builtin_amdgcn_s_sleep(1);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+        asm volatile("snop 0");
 #else
         ;
 #endif
@@ -1113,6 +1139,8 @@ LOW_LATENCY_COMBINE_RECV:
                  rdma_recv_flag + responsible_expert_idx) == 0)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
         __builtin_amdgcn_s_sleep(1);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+        asm volatile("snop 0");
 #else
         ;
 #endif
@@ -1123,6 +1151,8 @@ LOW_LATENCY_COMBINE_RECV:
                      rdma_recv_flag_internode + responsible_expert_idx)) == 0)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
         __builtin_amdgcn_s_sleep(1);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+        asm volatile("snop 0");
 #else
         ;
 #endif
@@ -1305,7 +1335,8 @@ void combine(void* combined_x, void* rdma_recv_x, int* rdma_recv_flag,
   }                                                                          \
   break
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   EP_HOST_ASSERT(num_warps_launch * WARP_SIZE <= MAX_NTHREADS);
 #endif
 

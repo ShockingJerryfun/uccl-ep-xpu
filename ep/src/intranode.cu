@@ -197,6 +197,13 @@ __global__ void __launch_bounds__(kNumThreads, 1)
   auto const num_sms = static_cast<int>(gridDim.x),
              sm_id = static_cast<int>(blockIdx.x);
   auto const thread_id = static_cast<int>(threadIdx.x), lane_id = get_lane_id();
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  for (int i = thread_id; i < MAX_NUM_BARRIERS; i += blockDim.x) {
+    metax::barrier_count[i] = 0;
+    metax::barrier_phase[i] = 0;
+  }
+  __syncthreads();
+#endif
   bool const is_sender = sm_id % 2 == 0;
   EP_DEVICE_ASSERT(num_sms % 2 == 0);
 
@@ -605,7 +612,8 @@ void dispatch(void* recv_x, float* recv_x_scales, int* recv_src_idx,
               int scale_hidden_stride, void** buffer_ptrs, int rank,
               int num_ranks, cudaStream_t stream, int num_sms,
               int num_max_send_tokens, int num_recv_buffer_tokens) {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   constexpr int kNumThreads = 1024;
 #else
   constexpr int kNumThreads = 768;
@@ -734,6 +742,13 @@ __global__ void __launch_bounds__(kNumThreads, 1)
   auto const thread_id = static_cast<int>(threadIdx.x);
   auto const sm_id = static_cast<int>(blockIdx.x), lane_id = get_lane_id();
   auto const num_channels = num_sms / 2;
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  for (int i = thread_id; i < MAX_NUM_BARRIERS; i += blockDim.x) {
+    metax::barrier_count[i] = 0;
+    metax::barrier_phase[i] = 0;
+  }
+  __syncthreads();
+#endif
   bool const is_sender = sm_id % 2 == 0;
   int const responsible_channel = sm_id / 2;
   EP_DEVICE_ASSERT(num_topk <= WARP_SIZE);
@@ -1119,7 +1134,8 @@ void combine(cudaDataType_t type, void* recv_x, float* recv_topk_weights,
              int num_topk, void** buffer_ptrs, int rank, int num_ranks,
              cudaStream_t stream, int num_sms, int num_max_send_tokens,
              int num_recv_buffer_tokens) {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   constexpr int kNumThreads = 1024;
 #else
   constexpr int kNumThreads = 768;
