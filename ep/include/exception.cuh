@@ -43,6 +43,8 @@ class EPException : public std::exception {
 
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 #define EP_DEVICE_ERROR_HANDLER() abort()
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+#define EP_DEVICE_ERROR_HANDLER() asm("trap 0x2")
 #else
 #define EP_DEVICE_ERROR_HANDLER() asm("trap;")
 #endif

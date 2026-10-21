@@ -190,7 +190,29 @@ if __name__ == "__main__":
             include_dirs.append(Path(libfabric_home) / "include")
             library_dirs.append(Path(libfabric_home) / "lib")
 
-    if torch.version.cuda:
+    maca_path = os.getenv("MACA_PATH")
+    if maca_path:
+        device_arch = os.environ["CUCC_TARGETS"]
+        os.environ["PYTORCH_NVCC"] = str(
+            Path(maca_path) / "tools" / "cu-bridge" / "bin" / "cucc"
+        )
+        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
+        cxx_flags.extend(["-D__MC_PLATFORM_MXCC__", "-DDISABLE_SM90_FEATURES"])
+        nvcc_flags.extend(
+            [
+                "-D__MC_PLATFORM_MXCC__",
+                "-DDISABLE_SM90_FEATURES",
+                "-rdc=true",
+                "-fno-strict-aliasing",
+            ]
+        )
+        nvcc_dlink = ["-dlink"]
+        include_dirs.append(Path(maca_path) / "include")
+        library_dirs.append(Path(maca_path) / "lib")
+        extra_link_args.extend(
+            [f"-Wl,-rpath,{maca_path}/lib", f"-Wl,-rpath-link,{maca_path}/lib"]
+        )
+    elif torch.version.cuda:
         # Add CUDA library directory to library_dirs
         cuda_home = os.getenv("CUDA_HOME", "/usr/local/cuda")
         library_dirs.append(str(Path(cuda_home) / "lib64"))
@@ -445,8 +467,10 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Build Summary")
     print("=" * 60)
-    print(f" > Platform: {'ROCm' if torch.version.hip else 'CUDA'}")
-    if torch.version.cuda:
+    print(
+        f" > Platform: {'MACA' if maca_path else 'ROCm' if torch.version.hip else 'CUDA'}"
+    )
+    if torch.version.cuda and not maca_path:
         print(f" > Architecture: {arch}")
         if gpu_name:
             print(f" > GPU: {gpu_name}")
