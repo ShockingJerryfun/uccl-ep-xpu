@@ -45,6 +45,47 @@ Alternatively, you can build `uccl.ep` wheel for ROCm7 using docker then install
 bash build.sh roc7 ep --install
 ```
 
+## Build on MetaX MACA
+
+The MetaX port targets cu-bridge and 64-lane GPUs. SDK interface probes compiled
+with MACA 3.7.0.38 on C500/AArch64; the complete extension and communication
+benchmarks have not been validated. Install the matching vendor PyTorch build,
+Ninja, nanobind and the existing verbs, libnl and NUMA development dependencies.
+The vendor PyTorch build must support cucc: the sampled SDK has no `nvcc` entry,
+and upstream PyTorch's version check still requires it even with `PYTORCH_NVCC`.
+
+```bash
+export MACA_PATH=/opt/maca-3.7.0
+export MACA_CLANG_PATH=$MACA_PATH/mxgpu_llvm/bin
+export CUCC_PATH=$MACA_PATH/tools/cu-bridge
+export CUDA_HOME=$CUCC_PATH
+export CUDA_PATH=$CUDA_HOME
+export CUCC_TARGETS=xcore1000
+export PATH=$CUCC_PATH/bin:$CUCC_PATH/tools:$MACA_CLANG_PATH:$MACA_PATH/bin:$PATH
+export LD_LIBRARY_PATH=$CUCC_PATH/lib:$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+python setup.py install
+```
+
+Set `CUCC_TARGETS` to the installed GPU target. The build selects cucc and disables
+SM90/TMA features; `TORCH_CUDA_ARCH_LIST=8.0` is the cu-bridge compatibility value,
+not the MetaX hardware target. FP8 uses E4M3 with a 448 maximum; LogFmt is excluded
+by the existing non-SM90 assertion. PyTorch ABI, device linking, numeric results,
+IPC and system-scope ordering remain [pending validation](docs/xpu-primitive-mapping.md#pending-validation).
+
+Standalone tests can be compiled without PyTorch:
+
+```bash
+make -C tests -f Makefile.maca primitive_test d2h_queue_test
+```
+
+After the device passes its baseline kernel smoke test, run each test with an
+external timeout. `primitive_test` checks warp operations and partial barriers;
+`d2h_queue_test` checks the actual FIFO command packing, publication, wraparound
+and acknowledgement. Exit status 0 indicates success. These are prerequisites
+for `bench/test_internode.py` and `bench/test_low_latency.py`, which additionally
+require vendor distributed-PyTorch support, peer access and the transport owner's
+working backend. A single-card queue test does not validate those benchmarks.
+
 ## Test import `uccl.ep`
 ```bash
 python -c "import torch; import uccl.ep"
