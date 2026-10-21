@@ -20,7 +20,9 @@
 // ============================================================================
 // Device Compilation Macros (from device.hpp)
 // ============================================================================
-#if (defined(__NVCC__) || defined(__HIP_PLATFORM_AMD__))
+#if defined(__NVCC__) || defined(__HIP_PLATFORM_AMD__) || \
+    (defined(__CUDACC__) &&                               \
+     (defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)))
 
 #define MSCCLPP_DEVICE_COMPILE
 #define MSCCLPP_INLINE __forceinline__

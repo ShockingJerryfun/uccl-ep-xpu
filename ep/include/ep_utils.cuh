@@ -3,6 +3,10 @@
 #include "ep_util.hpp"
 #include <atomic>
 
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+#include <cuda/atomic>
+#endif
+
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 #include "amd_nanosleep.cuh"
 #ifndef clock64
@@ -163,11 +167,18 @@ __device__ __forceinline__ void st_release_sys_global(dtype_t const* ptr,
 }
 
 }  // namespace amd
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+namespace metax {
+__shared__ int barrier_count[MAX_NUM_BARRIERS];
+__shared__ int barrier_phase[MAX_NUM_BARRIERS];
+}  // namespace metax
 #endif
 
 __forceinline__ __device__ int get_lane_id() {
   int lane_id;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+  lane_id = __lane_id();
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   lane_id = __lane_id();
 #else
   asm("mov.s32 %0, %laneid;" : "=r"(lane_id));
@@ -261,6 +272,8 @@ __forceinline__ __device__ T warp_reduce_max(T value) {
 __device__ __forceinline__ float log2f_approx(float const& x) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   return __builtin_amdgcn_logf(x);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  return __log2f(x);
 #else
   float ret;
   asm volatile("lg2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
@@ -269,7 +282,8 @@ __device__ __forceinline__ float log2f_approx(float const& x) {
 }
 
 __device__ __forceinline__ void tma_store_fence() {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   asm volatile("fence.proxy.async.shared::cta;");
 #else
   EP_DEVICE_ASSERT(false);
@@ -278,7 +292,8 @@ __device__ __forceinline__ void tma_store_fence() {
 
 template <int N = 0>
 __device__ __forceinline__ void tma_store_wait() {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(N) : "memory");
 #else
   EP_DEVICE_ASSERT(false);
@@ -286,7 +301,8 @@ __device__ __forceinline__ void tma_store_wait() {
 }
 
 __device__ __forceinline__ void fence_view_async_shared() {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   asm volatile("fence.proxy.async.shared::cta; \n" ::);
 #else
   EP_DEVICE_ASSERT(false);
@@ -294,7 +310,8 @@ __device__ __forceinline__ void fence_view_async_shared() {
 }
 
 __device__ __forceinline__ void fence_barrier_init() {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   asm volatile("fence.mbarrier_init.release.cluster; \n" ::);
 #else
   EP_DEVICE_ASSERT(false);
@@ -325,7 +342,8 @@ constexpr uint64_t kEvictNormal = 0x1000000000000000;
 
 __device__ __forceinline__ void mbarrier_arrive_and_expect_tx(
     uint64_t* mbar_ptr, int num_bytes) {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
   asm volatile(
       "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%1], %0; \n\t" ::"r"(
@@ -338,7 +356,8 @@ __device__ __forceinline__ void mbarrier_arrive_and_expect_tx(
 
 __device__ __forceinline__ void mbarrier_wait(uint64_t* mbar_ptr,
                                               uint32_t& phase) {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
   asm volatile(
       "{\n\t"
@@ -361,7 +380,8 @@ __device__ __forceinline__ void tma_store_1d(void const* smem_ptr,
                                              void const* gmem_ptr,
                                              int num_bytes,
                                              bool evict_first = true) {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   auto smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   auto const cache_hint = evict_first ? kEvictFirst : kEvictNormal;
   asm volatile(
@@ -379,7 +399,8 @@ __device__ __forceinline__ void tma_load_1d(void const* smem_ptr,
                                             void const* gmem_ptr,
                                             uint64_t* mbar_ptr, int num_bytes,
                                             bool evict_first = true) {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
   auto smem_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   auto const cache_hint = evict_first ? kEvictFirst : kEvictNormal;
@@ -395,7 +416,8 @@ __device__ __forceinline__ void tma_load_1d(void const* smem_ptr,
 
 __device__ __forceinline__ void mbarrier_init(uint64_t* mbar_ptr,
                                               uint32_t arrive_count) {
-#if __CUDA_ARCH__
+#if __CUDA_ARCH__ && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
   auto mbar_int_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(mbar_ptr));
   asm volatile("mbarrier.init.shared::cta.b64 [%1], %0;" ::"r"(arrive_count),
                "r"(mbar_int_ptr));
@@ -420,6 +442,8 @@ __forceinline__ __device__ int fast_log2_ceil(float x) {
 __device__ __forceinline__ float exp2f_approx(float const& x) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   return __builtin_amdgcn_exp2f(x);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  return exp2f(x);
 #else
   float ret;
   asm volatile("ex2.approx.f32 %0, %1;" : "=f"(ret) : "f"(x));
@@ -468,6 +492,8 @@ __device__ __forceinline__ uint8_t ld_nc_global(uint8_t const* ptr) {
   uint16_t ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __builtin_nontemporal_load((u8_gptr)ptr);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   // NOTES: we must use `uint16_t` as inline ASM does not support 8-bit
   // constraint letter (`h` below means unsigned 16-bit)
@@ -481,6 +507,8 @@ __device__ __forceinline__ int ld_nc_global(int const* ptr) {
   int ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __builtin_nontemporal_load((i32_gptr)ptr);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   asm volatile(LD_NC_FUNC ".s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
 #endif
@@ -492,6 +520,8 @@ __device__ __forceinline__ int64_t ld_nc_global(int64_t const* ptr) {
   int64_t ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __builtin_nontemporal_load((i64_gptr)ptr);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   asm volatile(LD_NC_FUNC ".s64 %0, [%1];" : "=l"(ret) : "l"(ptr));
 #endif
@@ -503,6 +533,8 @@ __device__ __forceinline__ float ld_nc_global(float const* ptr) {
   float ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __builtin_nontemporal_load((f32_gptr)ptr);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   asm volatile(LD_NC_FUNC ".f32 %0, [%1];" : "=f"(ret) : "l"(ptr));
 #endif
@@ -515,6 +547,9 @@ __device__ __forceinline__ int2 ld_nc_global(int2 const* ptr) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret.x = __builtin_nontemporal_load((i32_gptr)&ptr->x);
   ret.y = __builtin_nontemporal_load((i32_gptr)&ptr->y);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret.x = __builtin_nontemporal_load(&ptr->x);
+  ret.y = __builtin_nontemporal_load(&ptr->y);
 #else
   asm volatile(LD_NC_FUNC ".v2.s32 {%0, %1}, [%2];"
                : "=r"(ret.x), "=r"(ret.y)
@@ -531,6 +566,11 @@ __device__ __forceinline__ int4 ld_nc_global(int4 const* ptr) {
   ret.y = __builtin_nontemporal_load((i32_gptr)&ptr->y);
   ret.z = __builtin_nontemporal_load((i32_gptr)&ptr->z);
   ret.w = __builtin_nontemporal_load((i32_gptr)&ptr->w);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret.x = __builtin_nontemporal_load(&ptr->x);
+  ret.y = __builtin_nontemporal_load(&ptr->y);
+  ret.z = __builtin_nontemporal_load(&ptr->z);
+  ret.w = __builtin_nontemporal_load(&ptr->w);
 #else
   asm volatile(LD_NC_FUNC ".v4.s32 {%0, %1, %2, %3}, [%4];"
                : "=r"(ret.x), "=r"(ret.y), "=r"(ret.z), "=r"(ret.w)
@@ -557,6 +597,8 @@ template <>
 __device__ __forceinline__ void st_na_global(int const* ptr, int const& value) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   *(i32_gptr)ptr = value;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_nontemporal_store(value, const_cast<int*>(ptr));
 #else
   asm volatile(ST_NA_FUNC ".s32 [%0], %1;" ::"l"(ptr), "r"(value));
 #endif
@@ -567,6 +609,8 @@ __device__ __forceinline__ void st_na_global(int64_t const* ptr,
                                              int64_t const& value) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   *(i64_gptr)ptr = value;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_nontemporal_store(value, const_cast<int64_t*>(ptr));
 #else
   asm volatile(ST_NA_FUNC ".s64 [%0], %1;" ::"l"(ptr), "l"(value));
 #endif
@@ -577,6 +621,8 @@ __device__ __forceinline__ void st_na_global(float const* ptr,
                                              float const& value) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   *(f32_gptr)ptr = value;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_nontemporal_store(value, const_cast<float*>(ptr));
 #else
   asm volatile(ST_NA_FUNC ".f32 [%0], %1;" ::"l"(ptr), "f"(value));
 #endif
@@ -590,6 +636,11 @@ __device__ __forceinline__ void st_na_global(int4 const* ptr,
   *(i32_gptr)&ptr->y = value.y;
   *(i32_gptr)&ptr->z = value.z;
   *(i32_gptr)&ptr->w = value.w;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_nontemporal_store(value.x, const_cast<int*>(&ptr->x));
+  __builtin_nontemporal_store(value.y, const_cast<int*>(&ptr->y));
+  __builtin_nontemporal_store(value.z, const_cast<int*>(&ptr->z));
+  __builtin_nontemporal_store(value.w, const_cast<int*>(&ptr->w));
 #else
   asm volatile(ST_NA_FUNC ".v4.s32 [%0], {%1, %2, %3, %4};" ::"l"(ptr),
                "r"(value.x), "r"(value.y), "r"(value.z), "r"(value.w));
@@ -602,6 +653,9 @@ __device__ __forceinline__ int ld_acquire_sys_global(int const* ptr) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = amd::scoped_ld_acquire<kUseAggressiveAtomic, __HIP_MEMORY_SCOPE_SYSTEM>(
       ptr);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = cuda::atomic_ref<int, cuda::thread_scope_system>(*const_cast<int*>(ptr))
+            .load(cuda::memory_order_acquire);
 #else
   asm volatile("ld.acquire.sys.global.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
 #endif
@@ -638,6 +692,10 @@ ld_acquire_sys_global(uint32_t const volatile* p) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   v = amd::scoped_ld_acquire<kUseAggressiveAtomic, __HIP_MEMORY_SCOPE_SYSTEM>(
       p);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  v = cuda::atomic_ref<uint32_t, cuda::thread_scope_system>(
+          *const_cast<uint32_t*>(p))
+          .load(cuda::memory_order_acquire);
 #else
   asm volatile("ld.acquire.sys.global.u32 %0, [%1];" : "=r"(v) : "l"(p));
 #endif
@@ -651,6 +709,10 @@ ld_acquire_sys_global(uint64_t const volatile* p) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   v = amd::scoped_ld_acquire<kUseAggressiveAtomic, __HIP_MEMORY_SCOPE_SYSTEM>(
       p);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  v = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>(
+          *const_cast<uint64_t*>(p))
+          .load(cuda::memory_order_acquire);
 #else
   asm volatile("ld.acquire.sys.global.u64 %0, [%1];" : "=l"(v) : "l"(p));
 #endif
@@ -663,6 +725,10 @@ __device__ __forceinline__ uint64_t ld_acquire_sys_global(uint64_t const* ptr) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = amd::scoped_ld_acquire<kUseAggressiveAtomic, __HIP_MEMORY_SCOPE_SYSTEM>(
       ptr);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = cuda::atomic_ref<uint64_t, cuda::thread_scope_system>(
+            *const_cast<uint64_t*>(ptr))
+            .load(cuda::memory_order_acquire);
 #else
   asm volatile("ld.acquire.sys.global.u64 %0, [%1];" : "=l"(ret) : "l"(ptr));
 #endif
@@ -709,6 +775,9 @@ __device__ __forceinline__ int atomic_add_release_global(int const* ptr,
     ret = __hip_atomic_fetch_add(const_cast<int*>(ptr), value, __ATOMIC_RELEASE,
                                  __HIP_MEMORY_SCOPE_AGENT);
   }
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_mxc_fence(__ATOMIC_RELEASE, "device");
+  ret = atomicAdd(const_cast<int*>(ptr), value);
 #else
   asm volatile("atom.add.release.gpu.global.s32 %0, [%1], %2;"
                : "=r"(ret)
@@ -721,6 +790,8 @@ __device__ __forceinline__ uint32_t elect_one_sync(int lane_id) {
   uint32_t pred = 0;
 
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+  return lane_id == 0;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   return lane_id == 0;
 #else
   asm volatile(
@@ -743,6 +814,9 @@ __device__ __forceinline__ int ld_acquire_global(int const* ptr) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = amd::scoped_ld_acquire<kUseAggressiveAtomic, __HIP_MEMORY_SCOPE_AGENT>(
       ptr);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
+  __builtin_mxc_fence(__ATOMIC_ACQUIRE, "device");
 #else
   asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
 #endif
@@ -753,6 +827,9 @@ template <bool kUseAggressiveAtomic = false>
 __device__ __forceinline__ void st_release_sys_global(int const* ptr, int val) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   amd::st_release_sys_global<kUseAggressiveAtomic>(ptr, val);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  cuda::atomic_ref<int, cuda::thread_scope_system>(*const_cast<int*>(ptr))
+      .store(val, cuda::memory_order_release);
 #else
   asm volatile("st.release.sys.global.s32 [%0], %1;" ::"l"(ptr), "r"(val)
                : "memory");
@@ -763,6 +840,9 @@ __device__ __forceinline__ void st_release_cta(int const* ptr, int val) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   __hip_atomic_store(const_cast<int*>(ptr), val, __ATOMIC_RELEASE,
                      __HIP_MEMORY_SCOPE_WORKGROUP);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_mxc_fence(__ATOMIC_RELEASE, "block");
+  __builtin_nontemporal_store(val, const_cast<int*>(ptr));
 #else
   asm volatile("st.release.cta.s32 [%0], %1;" ::"l"(ptr), "r"(val) : "memory");
 #endif
@@ -788,11 +868,34 @@ __device__ inline void workgroup_sync_barrier(int barrier_id, int num_threads) {
     amd::barrier_sync(bar_ptr, num_participants);
   }
 }
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+
+template <bool kUseUnsafeSync = false>
+__device__ inline void workgroup_sync_barrier(int barrier_id, int num_threads) {
+  int const num_warps = num_threads / WARP_SIZE;
+  __threadfence_block();
+  __syncwarp();
+  if (get_lane_id() == 0) {
+    int const phase = atomicAdd(metax::barrier_phase + barrier_id, 0);
+    int const ticket = atomicAdd(metax::barrier_count + barrier_id, 1);
+    if (ticket == num_warps - 1) {
+      metax::barrier_count[barrier_id] = 0;
+      __threadfence_block();
+      atomicAdd(metax::barrier_phase + barrier_id, 1);
+    } else {
+      while (atomicAdd(metax::barrier_phase + barrier_id, 0) == phase)
+        asm volatile("snop 0");
+    }
+  }
+  __syncwarp();
+  __threadfence_block();
+}
 #endif
 
 template <bool kUseUnsafeSync = false>
 __device__ inline void sync_barrier(int barrier_id, int num_threads) {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   workgroup_sync_barrier<kUseUnsafeSync>(barrier_id, num_threads);
 #else
   asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(num_threads));
@@ -801,7 +904,8 @@ __device__ inline void sync_barrier(int barrier_id, int num_threads) {
 
 template <bool kUseUnsafedSync = false>
 __device__ inline void sync_barrier_1(int num_threads) {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   workgroup_sync_barrier<kUseUnsafedSync>(1, num_threads);
 #else
   asm volatile("bar.sync 1, %0;" ::"r"(num_threads));
@@ -809,7 +913,9 @@ __device__ inline void sync_barrier_1(int num_threads) {
 }
 
 __device__ inline void sys_membar() {
-#if __CUDA_ARCH__
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __threadfence_system();
+#elif __CUDA_ARCH__
   asm volatile("membar.sys;" ::: "memory");
 #endif
 }
@@ -817,6 +923,8 @@ __device__ inline void sys_membar() {
 __device__ __forceinline__ void trap() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   abort();
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  asm volatile("trap 0x2");
 #else
   asm("trap;");
 #endif
@@ -826,6 +934,8 @@ __device__ __forceinline__ int ld_volatile_global(int const* ptr) {
   int ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __atomic_load_n(const_cast<int*>(ptr), __ATOMIC_RELAXED);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
 #endif
@@ -836,6 +946,8 @@ __device__ __forceinline__ float ld_volatile_global(float const* ptr) {
   float ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   __atomic_load(const_cast<float*>(ptr), &ret, __ATOMIC_RELAXED);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   asm volatile("ld.volatile.global.f32 %0, [%1];" : "=f"(ret) : "l"(ptr));
 #endif
@@ -846,6 +958,8 @@ __device__ __forceinline__ int64_t ld_volatile_global(int64_t const* ptr) {
   int64_t ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __atomic_load_n(const_cast<int64_t*>(ptr), __ATOMIC_RELAXED);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   asm volatile("ld.volatile.global.s64 %0, [%1];" : "=l"(ret) : "l"(ptr));
 #endif
@@ -856,6 +970,8 @@ __device__ __forceinline__ int64_t ld_volatile_global(uint64_t const* ptr) {
   int64_t ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __atomic_load_n(const_cast<uint64_t*>(ptr), __ATOMIC_RELAXED);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
 #else
   asm volatile("ld.volatile.global.u64 %0, [%1];" : "=l"(ret) : "l"(ptr));
 #endif
@@ -864,6 +980,8 @@ __device__ __forceinline__ int64_t ld_volatile_global(uint64_t const* ptr) {
 
 __device__ __forceinline__ void memory_fence() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+  __threadfence_system();
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   __threadfence_system();
 #else
   asm volatile("fence.acq_rel.sys;" ::: "memory");
@@ -878,6 +996,10 @@ __forceinline__ __device__ int atomic_cas_cta_acquire(int* addr, int x, int y) {
                                        __ATOMIC_RELAXED,
                                        __HIP_MEMORY_SCOPE_WORKGROUP);
   return x;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  int const ret = atomicCAS(addr, x, y);
+  __builtin_mxc_fence(__ATOMIC_ACQUIRE, "block");
+  return ret;
 #else
   int ret;
   asm volatile("atom.acquire.cta.shared::cta.cas.b32 %0, [%1], %2, %3;"
@@ -893,6 +1015,9 @@ __forceinline__ __device__ int atomic_exch_cta_release(int* addr, int x) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __hip_atomic_exchange(addr, x, __ATOMIC_RELEASE,
                               __HIP_MEMORY_SCOPE_WORKGROUP);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_mxc_fence(__ATOMIC_RELEASE, "block");
+  ret = atomicExch(addr, x);
 #else
   asm volatile("atom.release.cta.shared::cta.exch.b32 %0, [%1], %2;"
                : "=r"(ret)
@@ -964,6 +1089,8 @@ __device__ __forceinline__ dtype_t broadcast(dtype_t& ptr, int src_lane_idx) {
 __device__ __forceinline__ void memory_fence_gpu() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   __threadfence();
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_mxc_fence(__ATOMIC_ACQ_REL, "device");
 #else
   asm volatile("fence.acq_rel.gpu;" ::: "memory");
 #endif
@@ -972,6 +1099,8 @@ __device__ __forceinline__ void memory_fence_gpu() {
 __device__ __forceinline__ void memory_fence_cta() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   __threadfence_block();
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  __builtin_mxc_fence(__ATOMIC_ACQ_REL, "block");
 #else
   asm volatile("fence.acq_rel.cta;" ::: "memory");
 #endif
@@ -981,6 +1110,9 @@ __device__ __forceinline__ void st_relaxed_sys_global(int const* ptr, int val) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   __hip_atomic_store(const_cast<int*>(ptr), val, __ATOMIC_RELAXED,
                      __HIP_MEMORY_SCOPE_SYSTEM);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  cuda::atomic_ref<int, cuda::thread_scope_system>(*const_cast<int*>(ptr))
+      .store(val, cuda::memory_order_relaxed);
 #else
   asm volatile("st.relaxed.sys.global.s32 [%0], %1;" ::"l"(ptr), "r"(val)
                : "memory");
@@ -991,6 +1123,9 @@ __device__ __forceinline__ int ld_acquire_cta(int const* ptr) {
   int ret;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   ret = __hip_atomic_load(ptr, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_WORKGROUP);
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  ret = __builtin_nontemporal_load(ptr);
+  __builtin_mxc_fence(__ATOMIC_ACQUIRE, "block");
 #else
   asm volatile("ld.acquire.cta.s32 %0, [%1];" : "=r"(ret) : "l"(ptr));
 #endif
