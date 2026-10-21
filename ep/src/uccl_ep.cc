@@ -13,6 +13,7 @@
 #include "internode.cuh"
 #include "internode_ll.cuh"
 #include "intranode.cuh"
+#include "rdma_registration.hpp"
 #include "layout.hpp"
 #include "rdma.hpp"
 #include "ring_buffer.cuh"
@@ -308,7 +309,7 @@ std::tuple<nb::object, bool> allocate_rdma_buffer_dlpack(
 
   std::shared_ptr<void> urma_owner;
   try {
-#if defined(USE_URMA_METAX)
+#if defined(USE_METAX)
   if (use_urma) {
     ptr = gpu_p2p::allocate_device(backing_bytes, device_index);
     gpu_p2p::zero_memory(ptr, alloc_bytes, gpu_p2p::MemoryKind::Device,
@@ -324,9 +325,20 @@ std::tuple<nb::object, bool> allocate_rdma_buffer_dlpack(
   CUDA_CHECK(cudaMalloc(&ptr, backing_bytes));
   CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
 #else
-  bool const use_host_alloc =
-      !use_urma && !force_device_alloc && num_rdma_bytes > 0 && has_any_nic() &&
-      !can_register_gpu_memory_for_rdma(device_index, num_rdma_bytes);
+  bool registration_ok = true;
+  auto const registration_mode = uccl::rdma::parse_gpu_registration_mode(
+      std::getenv("UCCL_EP_VERBS_REG"));
+  if (!use_urma && num_rdma_bytes > 0 && has_any_nic())
+    registration_ok =
+        can_register_gpu_memory_for_rdma(device_index, num_rdma_bytes);
+  if (!registration_ok &&
+      registration_mode != uccl::rdma::GpuRegistrationMode::Auto) {
+    throw std::runtime_error(
+        std::string("strict verbs GPU registration failed: ") +
+        uccl::rdma::gpu_registration_mode_name(registration_mode));
+  }
+  bool const use_host_alloc = !use_urma && !force_device_alloc &&
+                              num_rdma_bytes > 0 && !registration_ok;
   if (!use_host_alloc) {
     CUDA_CHECK(cudaMalloc(&ptr, backing_bytes));
     CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
@@ -349,7 +361,7 @@ std::tuple<nb::object, bool> allocate_rdma_buffer_dlpack(
       urma_owner.reset();
       throw;
     }
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
     if (use_urma) {
       gpu_p2p::release_memory(ptr, gpu_p2p::MemoryKind::Device, device_index);
       throw;
@@ -1610,7 +1622,7 @@ class Buffer {
   }
 
   void reset_rdma_buffer() {
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
     if (ep_uses_urma()) {
       gpu_p2p::zero_memory(rdma_buffer_ptr, num_rdma_bytes,
                            gpu_p2p::MemoryKind::Device, device_index);
@@ -2018,7 +2030,10 @@ NB_MODULE(ep, m) {
 #else
         CUDA_CHECK(cudaSetDevice(device_index));
         if (!has_any_nic()) return false;
-        return !can_register_gpu_memory_for_rdma(device_index, num_bytes);
+        auto const mode = uccl::rdma::parse_gpu_registration_mode(
+            std::getenv("UCCL_EP_VERBS_REG"));
+        return mode == uccl::rdma::GpuRegistrationMode::Auto &&
+               !can_register_gpu_memory_for_rdma(device_index, num_bytes);
 #endif
       },
       nb::arg("device_index"), nb::arg("num_bytes") = 4096,

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gpu_platform.hpp"
 #include "transport.hpp"
 #ifdef USE_URMA
 #if __has_include(<ub/umdk/urma/urma_api.h>)

@@ -64,7 +64,7 @@ extern "C" int mcMemcpy(void* dst, void const* src, size_t bytes, int) {
 
     metax_cmd = [os.environ.get('CXX', 'c++'), '-std=c++17', '-pthread',
                  '-Wall', '-Wextra', '-Werror', '-DUSE_URMA',
-                 '-DUSE_URMA_METAX',
+                 '-DUSE_METAX',
                  '-I' + str(ep / 'tests/urma_support'),
                  '-I' + str(ep / 'include'), '-I' + str(a.sdk_include.resolve()),
                  '-I' + str(tmp), '-include',
@@ -83,7 +83,7 @@ extern "C" int mcMemcpy(void* dst, void const* src, size_t bytes, int) {
 
         runtime_test = tmp / 'metax_runtime_test'
         subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17',
-                        '-Wall', '-Wextra', '-Werror', '-DUSE_URMA_METAX',
+                        '-Wall', '-Wextra', '-Werror', '-DUSE_METAX',
                         '-I' + str(ep / 'include'),
                         str(ep / 'src/gpu_p2p_runtime.cpp'),
                         str(ep / 'tests/gpu_p2p_runtime_test.cpp'),
@@ -91,6 +91,7 @@ extern "C" int mcMemcpy(void* dst, void const* src, size_t bytes, int) {
         subprocess.run([str(runtime_test)], check=True, env=metax_env)
 
     for defines in ([], ['-DUSE_URMA'],
+                    ['-DUSE_URMA', '-DUSE_METAX'],
                     ['-DUSE_URMA', '-DUSE_URMA_METAX'],
                     ['-DUSE_URMA', '-DUSE_SUBSET_BARRIER'],
                     ['-DUSE_URMA', '-D__HIPCC__']):

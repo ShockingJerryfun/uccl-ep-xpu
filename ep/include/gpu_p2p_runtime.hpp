@@ -1,5 +1,7 @@
 #pragma once
 
+#include "gpu_platform.hpp"
+
 #include <cstddef>
 
 namespace uccl::gpu_p2p {

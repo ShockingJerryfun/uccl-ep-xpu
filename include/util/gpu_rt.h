@@ -1,5 +1,10 @@
 #pragma once
 
+// Compatibility for builds that used the original URMA-specific MetaX flag.
+#if defined(USE_URMA_METAX) && !defined(USE_METAX)
+#define USE_METAX
+#endif
+
 #if defined(__CAMBRICON_PLATFORM_MLU__)
 // Cambricon MLU: map the gpu* abstraction onto CNRT (cnrt*) / CNDRV (cn*);
 // direct macros where signatures match, inline wrappers where they differ.
@@ -22,6 +27,7 @@
 #define gpuLaunchHostFunc cnrtInvokeHostFunc  // (queue, fn, data) order matches
 #define gpuHostFn_t cnrtHostFn_t
 #define gpuSetDevice cnrtSetDevice
+#define gpuDeviceSynchronize cnrtSyncDevice
 #define gpuGetDevice cnrtGetDevice
 #define gpuDeviceGetPCIBusId cnrtDeviceGetPCIBusId
 // IPC memory: Acquire/Map/UnMap correspond to CUDA Get/Open/Close.
@@ -46,6 +52,7 @@
 #define gpuPointerAttribute_t cnrtPointerAttributes_t
 #define gpuPointerGetAttributes cnrtPointerGetAttributes
 #define gpuMemoryTypeDevice cnrtMemTypeDevice
+#define gpuMemoryTypeHost cnrtMemTypeHost
 // CNRT has no managed memory type; alias to device so the check degenerates.
 #define gpuMemoryTypeManaged cnrtMemTypeDevice
 #define gpuMemTypeOf(a) (a).type
@@ -114,6 +121,7 @@ inline gpuError_t gpuMemGetAddressRange(void** base_ptr, size_t* size,
 #define gpuHostFn_t cudaHostFn_t
 #define gpuDeviceProp cudaDeviceProp
 #define gpuSetDevice cudaSetDevice
+#define gpuDeviceSynchronize cudaDeviceSynchronize
 #define gpuDeviceMapHost cudaDeviceMapHost
 #define gpuSetDeviceFlags cudaSetDeviceFlags
 #define gpuGetDevice cudaGetDevice
@@ -171,12 +179,22 @@ inline gpuError_t gpuMemGetAddressRange(void** base_ptr, size_t* size,
 #define gpuPointerAttribute_t cudaPointerAttributes
 #define gpuPointerGetAttributes cudaPointerGetAttributes
 #define gpuMemoryTypeDevice cudaMemoryTypeDevice
+#define gpuMemoryTypeHost cudaMemoryTypeHost
 #define gpuMemoryTypeManaged cudaMemoryTypeManaged
 #define gpuMemTypeOf(a) (a).type
+#ifdef USE_METAX
+// MACA cu-bridge maps the CUDA runtime surface used by UCCL kernels, while
+// DMA-BUF export is resolved from the native MACA runtime.
+#define GPU_DRIVER_LIB_NAME "libmcruntime.so"
+#define GPU_DRIVER_LIB_NAME_FALLBACK "libmcruntime.so.1"
+#define GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME \
+  "mcMemGetHandleForAddressRange"
+#else
 #define GPU_DRIVER_LIB_NAME "libcuda.so.1"
 #define GPU_DRIVER_LIB_NAME_FALLBACK "libcuda.so"
 #define GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME \
   "cuMemGetHandleForAddressRange"
+#endif
 inline gpuError_t gpuMemGetAddressRange(void** base_ptr, size_t* size,
                                         void* ptr) {
   CUdeviceptr base;
@@ -209,6 +227,7 @@ inline gpuError_t gpuMemGetAddressRange(void** base_ptr, size_t* size,
 #define gpuLaunchHostFunc hipLaunchHostFunc
 #define gpuHostFn_t hipHostFn_t
 #define gpuSetDevice hipSetDevice
+#define gpuDeviceSynchronize hipDeviceSynchronize
 #define gpuDeviceMapHost hipDeviceMapHost
 #define gpuSetDeviceFlags hipSetDeviceFlags
 #define gpuGetDevice hipGetDevice
@@ -277,6 +296,7 @@ typedef int gpuMemRangeHandleType;
 #define gpuPointerAttribute_t hipPointerAttribute_t
 #define gpuPointerGetAttributes hipPointerGetAttributes
 #define gpuMemoryTypeDevice hipMemoryTypeDevice
+#define gpuMemoryTypeHost hipMemoryTypeHost
 #define gpuMemoryTypeManaged hipMemoryTypeManaged
 #ifdef __UCCL_DTK__
 #define gpuMemTypeOf(a) (a).memoryType
@@ -285,7 +305,14 @@ typedef int gpuMemRangeHandleType;
 #endif
 #define GPU_DRIVER_LIB_NAME "libamdhip64.so"
 #define GPU_DRIVER_LIB_NAME_FALLBACK "libamdhip64.so"
-#define gpuMemGetAddressRange hipMemGetAddressRange
+inline gpuError_t gpuMemGetAddressRange(void** base_ptr, size_t* size,
+                                        void* ptr) {
+  hipDeviceptr_t base;
+  hipError_t result = hipMemGetAddressRange(
+      &base, size, reinterpret_cast<hipDeviceptr_t>(ptr));
+  if (result == hipSuccess) *base_ptr = reinterpret_cast<void*>(base);
+  return result;
+}
 #endif
 
 // Function pointer type for DMA-BUF handle export (loaded via dlsym)

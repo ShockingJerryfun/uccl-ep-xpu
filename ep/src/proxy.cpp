@@ -503,7 +503,7 @@ void Proxy::init_common() {
   // TODO(MaoZiming): Skip registering for EFA.
   if (atomic_buffer_ptr_ && !ctx_.atomic_buffer_mr) {
     ctx_.atomic_buffer_mr =
-        ibv_reg_mr(ctx_.pd, atomic_buffer_ptr_, kAtomicBufferSize,
+        register_control_buffer_mr(ctx_.pd, atomic_buffer_ptr_, kAtomicBufferSize,
                    IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
 #ifdef EFA
                        IBV_ACCESS_REMOTE_READ

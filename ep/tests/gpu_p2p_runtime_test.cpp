@@ -21,7 +21,7 @@ void rejects(F&& f) {
 int main() {
   using namespace uccl::gpu_p2p;
 
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   assert(vendor() == Vendor::MetaX);
   assert(registration_alignment() == 4096);
   assert(atomic_buffer_is_gpu_memory());

@@ -2,6 +2,7 @@
 #include "adaptive_sleeper.hpp"
 #include "common.hpp"
 #include "proxy_ctx.hpp"
+#include "rdma_registration.hpp"
 #include "rdma_util.hpp"
 #include "util/gpu_rt.h"
 #include <infiniband/verbs.h>
@@ -31,6 +32,9 @@
 #include <unordered_set>
 #include <vector>
 #include <fcntl.h>
+#ifdef USE_DMABUF
+#include <dlfcn.h>
+#endif
 #if defined(__x86_64__) || defined(__i386__)
 #include <immintrin.h>
 #endif
@@ -48,105 +52,125 @@
 
 #ifdef USE_DMABUF
 // ---------------------------------------------------------------------------
-// DMA-BUF based GPU memory registration (avoids nvidia_peermem dependency)
-// Requires GPU driver support and kernel DMA-BUF support.
-// Falls back to ibv_reg_mr_iova2 when DMA-BUF is unavailable.
-//
-// We export a DMA-BUF fd covering [gpu_buf, gpu_buf + export_size) where
-// export_size is `bytes` rounded up to the GPU page granularity (2 MiB).
-// The GPU driver API requires this alignment.
-// Under full IOMMU translation the kernel builds per-page IOMMU mappings for
-// the entire scatter-gather list of the fd, so we keep the export as small as
-// possible (never the entire allocation) to avoid exhausting mapping resources.
+// DMA-BUF based GPU memory registration. The exporter and range query are
+// supplied by the selected GPU platform (CUDA or MACA). Registration policy is
+// handled by the caller so strict dmabuf mode can never silently use peermem.
 // ---------------------------------------------------------------------------
 
-// GPU page granularity for DMA-BUF export.
-// On modern GPUs (NVIDIA Hopper/Ada, AMD MI300, etc.) this is 2 MiB.
-static constexpr size_t kDmabufGranularity = 2ULL << 20;  // 2 MiB
+namespace {
+
+gpuMemGetHandleForAddressRange_fn dmabuf_export_function() {
+  static gpuMemGetHandleForAddressRange_fn function = nullptr;
+  static std::once_flag init_flag;
+  std::call_once(init_flag, []() {
+    void* handle = nullptr;
+#ifdef USE_METAX
+    if (char const* runtime = getenv("UCCL_METAX_RUNTIME_LIB"))
+      handle = dlopen(runtime, RTLD_LAZY | RTLD_LOCAL);
+#endif
+    if (!handle)
+      handle = dlopen(GPU_DRIVER_LIB_NAME, RTLD_LAZY | RTLD_LOCAL);
+    if (!handle)
+      handle = dlopen(GPU_DRIVER_LIB_NAME_FALLBACK, RTLD_LAZY | RTLD_LOCAL);
+    if (handle) {
+      function = reinterpret_cast<gpuMemGetHandleForAddressRange_fn>(
+          dlsym(handle, GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME));
+    }
+  });
+  return function;
+}
+
+struct DmabufExport {
+  int fd = -1;
+  size_t offset = 0;
+  uintptr_t base = 0;
+  size_t size = 0;
+};
+
+bool export_gpu_dmabuf(void* gpu_buf, size_t bytes, DmabufExport& out) {
+  auto export_function = dmabuf_export_function();
+  if (!export_function) {
+    fprintf(stderr,
+            "[RDMA] DMA-BUF exporter %s is unavailable in %s/%s\n",
+            GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME, GPU_DRIVER_LIB_NAME,
+            GPU_DRIVER_LIB_NAME_FALLBACK);
+    return false;
+  }
+
+  void* allocation_base_ptr = nullptr;
+  size_t allocation_size = 0;
+  gpuError_t range_status =
+      gpuMemGetAddressRange(&allocation_base_ptr, &allocation_size, gpu_buf);
+  if (range_status != gpuSuccess) {
+    fprintf(stderr,
+            "[RDMA] GPU allocation range query failed for %p: %s\n", gpu_buf,
+            gpuGetErrorString(range_status));
+    return false;
+  }
+
+  long const system_page = sysconf(_SC_PAGESIZE);
+  if (system_page <= 0) {
+    fprintf(stderr, "[RDMA] cannot determine system page size for DMA-BUF\n");
+    return false;
+  }
+
+  uccl::rdma::DmabufExportRange range{};
+  try {
+    range = uccl::rdma::make_dmabuf_export_range(
+        reinterpret_cast<uintptr_t>(gpu_buf), bytes,
+        reinterpret_cast<uintptr_t>(allocation_base_ptr), allocation_size,
+        static_cast<size_t>(system_page));
+  } catch (std::exception const& error) {
+    fprintf(stderr, "[RDMA] invalid DMA-BUF export range: %s\n", error.what());
+    return false;
+  }
+
+  int fd = -1;
+  gpuDriverResult_t const status = export_function(
+      &fd, (gpuDevicePtr_t)range.export_base, range.export_size,
+      GPU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+  if (status != gpuDriverSuccess || fd < 0) {
+    fprintf(stderr,
+            "[RDMA] %s failed (error=%d, request=%p/%zu, export=%p/%zu)\n",
+            GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME, static_cast<int>(status),
+            gpu_buf, bytes, reinterpret_cast<void*>(range.export_base),
+            range.export_size);
+    if (fd >= 0) close(fd);
+    return false;
+  }
+
+  out.fd = fd;
+  out.offset = range.fd_offset;
+  out.base = range.export_base;
+  out.size = range.export_size;
+  return true;
+}
+
+}  // namespace
 
 ibv_mr* reg_mr_gpu_dmabuf(ibv_pd* pd, void* gpu_buf, size_t bytes,
                           uint64_t iova, int access) {
-  static gpuMemGetHandleForAddressRange_fn gpuGetHandleForRange_func = nullptr;
-  static std::once_flag init_flag;
+  DmabufExport export_info;
+  if (!export_gpu_dmabuf(gpu_buf, bytes, export_info)) return nullptr;
 
-  std::call_once(init_flag, []() {
-    void* handle = dlopen(GPU_DRIVER_LIB_NAME, RTLD_LAZY);
-    if (!handle) handle = dlopen(GPU_DRIVER_LIB_NAME_FALLBACK, RTLD_LAZY);
-    if (handle) {
-      gpuGetHandleForRange_func = (gpuMemGetHandleForAddressRange_fn)dlsym(
-          handle, GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME);
-    }
-  });
-
-  if (!gpuGetHandleForRange_func) {
-    fprintf(stderr,
-            "[RDMA] GPU Driver API functions not available, "
-            "falling back to ibv_reg_mr_iova2 (needs peermem, e.g. "
-            "nvidia_peermem for NVIDIA GPU)\n");
-    return ibv_reg_mr_iova2(pd, gpu_buf, bytes, iova, access);
-  }
-
-  // The GPU driver API requires the size to be aligned to the GPU
-  // page granularity (2 MiB).  Round up bytes to the next multiple.
-  // NOTE: Do NOT cap at gpuMemGetAddressRange's reported alloc_size — that API
-  // returns the *requested* size, not the actual (internally rounded-up) size.
-  // GPU malloc always rounds up to at least 2 MiB, so the aligned export_size
-  // is safe.
-  size_t export_size = ((bytes + kDmabufGranularity - 1) / kDmabufGranularity) *
-                       kDmabufGranularity;
-  gpuDriverResult_t drv_err;
-
-  fprintf(stderr,
-          "[RDMA] DMA-BUF: gpu_buf=%p bytes=%zu export_size=%zu (%.1f GiB)\n",
-          gpu_buf, bytes, export_size,
-          export_size / (1024.0 * 1024.0 * 1024.0));
-
-  // Export DMA-BUF fd for the aligned region.
-  int dmabuf_fd = -1;
-  drv_err = gpuGetHandleForRange_func(&dmabuf_fd, (gpuDevicePtr_t)gpu_buf,
-                                      export_size,
-                                      GPU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
-
-  if (drv_err != gpuDriverSuccess) {
-    fprintf(stderr,
-            "[RDMA] gpuMemGetHandleForAddressRange failed (error=%d), "
-            "falling back to ibv_reg_mr_iova2 (needs peermem, e.g. "
-            "nvidia_peermem for NVIDIA GPU)\n",
-            (int)drv_err);
-    return ibv_reg_mr_iova2(pd, gpu_buf, bytes, iova, access);
-  }
-
-  // Register only the actual bytes needed (fd covers export_size ≥ bytes).
-  ibv_mr* mr =
-      ibv_reg_dmabuf_mr(pd, /*fd_offset=*/0, bytes, iova, dmabuf_fd, access);
+  ibv_mr* mr = ibv_reg_dmabuf_mr(pd, export_info.offset, bytes, iova,
+                                 export_info.fd, access);
+  int const saved_errno = errno;
+  close(export_info.fd);
   if (!mr) {
-    // Return NULL so the caller can try chunked DMA-BUF registration.
-    // Under full IOMMU translation, large registrations exhaust IOMMU mapping
-    // resources (ENOMEM); chunking keeps each call within the safe size limit.
     fprintf(stderr,
-            "[RDMA] ibv_reg_dmabuf_mr failed (errno=%d: %s), "
-            "will try chunked registration\n",
-            errno, strerror(errno));
-    close(dmabuf_fd);
+            "[RDMA] ibv_reg_dmabuf_mr failed (offset=%zu, bytes=%zu, "
+            "errno=%d: %s)\n",
+            export_info.offset, bytes, saved_errno, strerror(saved_errno));
+    errno = saved_errno;
     return nullptr;
   }
-
-  close(dmabuf_fd);  // fd can be closed after registration
-
-  // ibv_reg_dmabuf_mr() sets mr->addr to the offset parameter
-  // , not the GPU virtual address. Downstream code uses
-  // mr->addr as the base for SGE addresses, so we must override it with iova
-  // (the GPU virtual address). ibv_reg_mr_iova2() sets mr->addr to the addr
-  // parameter. Since we pass addr=gpu_buf and iova=gpu_buf (same value),
-  // mr->addr is correctly set to the GPU virtual address without manual
-  // intervention.
   mr->addr = reinterpret_cast<void*>(iova);
 
   fprintf(stderr,
           "[RDMA] Registered GPU memory via DMA-BUF "
-          "(addr=%p, len=%zu, rkey=0x%x) — no peermem needed (e.g. no "
-          "nvidia_peermem for NVIDIA GPU)\n",
-          mr->addr, bytes, mr->rkey);
+          "(addr=%p, len=%zu, fd_offset=%zu, rkey=0x%x)\n",
+          mr->addr, bytes, export_info.offset, mr->rkey);
   return mr;
 }
 
@@ -156,24 +180,6 @@ std::vector<MRChunk> reg_mr_gpu_dmabuf_chunked(ibv_pd* pd, void* gpu_buf,
                                                size_t bytes, uint64_t iova,
                                                int access,
                                                size_t max_chunk_size) {
-  // Re-resolve (call_once in reg_mr_gpu_dmabuf may already have run).
-  static gpuMemGetHandleForAddressRange_fn gpuGetHandleForRange_func = nullptr;
-  if (!gpuGetHandleForRange_func) {
-    void* handle = dlopen(GPU_DRIVER_LIB_NAME, RTLD_LAZY);
-    if (!handle) handle = dlopen(GPU_DRIVER_LIB_NAME_FALLBACK, RTLD_LAZY);
-    if (handle) {
-      gpuGetHandleForRange_func = (gpuMemGetHandleForAddressRange_fn)dlsym(
-          handle, GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME);
-    }
-  }
-  if (!gpuGetHandleForRange_func) {
-    fprintf(stderr,
-            "[RDMA] GPU Driver API not available for chunked DMA-BUF\n");
-    return {};
-  }
-
-  gpuDriverResult_t drv_err;
-
   // NOTE: We must NOT export a single DMA-BUF fd for the entire GPU
   // allocation.  Under full IOMMU translation, the kernel builds per-page
   // IOMMU mappings for the complete scatter-gather list of the fd, regardless
@@ -195,43 +201,24 @@ std::vector<MRChunk> reg_mr_gpu_dmabuf_chunked(ibv_pd* pd, void* gpu_buf,
 
   while (registered < bytes) {
     size_t chunk_len = std::min(max_chunk_size, bytes - registered);
-    gpuDevicePtr_t chunk_start =
-        (gpuDevicePtr_t)((uintptr_t)gpu_buf + registered);
+    void* chunk_start = reinterpret_cast<void*>(
+        reinterpret_cast<uintptr_t>(gpu_buf) + registered);
     uint64_t chunk_iova = iova + registered;
 
-    // Round up chunk export size to GPU page granularity (required by the
-    // DMA-BUF export API).  We do NOT cap at gpuMemGetAddressRange's reported
-    // size — that API returns the *requested* allocation size, not the
-    // actual (internally rounded-up) size.  GPU malloc always rounds up to at
-    // least 2 MiB, so the aligned export_size is always within bounds.
-    size_t export_size =
-        ((chunk_len + kDmabufGranularity - 1) / kDmabufGranularity) *
-        kDmabufGranularity;
-
-    // Export a DMA-BUF fd covering this chunk (with aligned size).
-    int dmabuf_fd = -1;
-    drv_err =
-        gpuGetHandleForRange_func(&dmabuf_fd, chunk_start, export_size,
-                                  GPU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
-    if (drv_err != gpuDriverSuccess) {
+    DmabufExport export_info;
+    if (!export_gpu_dmabuf(chunk_start, chunk_len, export_info)) {
       fprintf(stderr,
-              "[RDMA] gpuMemGetHandleForAddressRange chunk %zu/%zu failed "
-              "(error=%d, offset=%zu, len=%zu, export_size=%zu)\n",
-              chunks.size() + 1, num_chunks, (int)drv_err, registered,
-              chunk_len, export_size);
+              "[RDMA] DMA-BUF export for chunk %zu/%zu failed "
+              "(offset=%zu, len=%zu)\n",
+              chunks.size() + 1, num_chunks, registered, chunk_len);
       for (auto& c : chunks) ibv_dereg_mr(c.mr);
       return {};
     }
 
-    // Register only the actual bytes needed (fd covers export_size >=
-    // chunk_len). fd_offset=0 because each chunk has its own DMA-BUF fd
-    // exported via the GPU driver API with chunk_start as the base
-    // address — the fd already begins at that chunk's GPU virtual address, so
-    // the registration always starts at offset 0 within the fd.
-    ibv_mr* mr = ibv_reg_dmabuf_mr(pd, /*fd_offset=*/0, chunk_len, chunk_iova,
-                                   dmabuf_fd, access);
+    ibv_mr* mr = ibv_reg_dmabuf_mr(pd, export_info.offset, chunk_len,
+                                   chunk_iova, export_info.fd, access);
     int saved_errno = errno;
-    close(dmabuf_fd);
+    close(export_info.fd);
 
     if (!mr) {
       fprintf(stderr,
@@ -242,7 +229,7 @@ std::vector<MRChunk> reg_mr_gpu_dmabuf_chunked(ibv_pd* pd, void* gpu_buf,
       for (auto& c : chunks) ibv_dereg_mr(c.mr);
       return {};
     }
-    if (!mr->addr) mr->addr = reinterpret_cast<void*>(chunk_iova);
+    mr->addr = reinterpret_cast<void*>(chunk_iova);
 
     chunks.push_back({(uintptr_t)gpu_buf + registered, chunk_len, mr});
     fprintf(stderr,
@@ -371,20 +358,35 @@ void send_connection_info_as_client(int my_rank, int peer, char const* peer_ip,
 
 namespace {
 
-bool is_cuda_host_pointer(void* ptr) {
-  cudaPointerAttributes attr{};
-  cudaError_t err = cudaPointerGetAttributes(&attr, ptr);
-  if (err != cudaSuccess) {
-    // Clear sticky CUDA error state for callers.
-    (void)cudaGetLastError();
+bool is_gpu_host_pointer(void* ptr) {
+  gpuPointerAttribute_t attr{};
+  gpuError_t err = gpuPointerGetAttributes(&attr, ptr);
+  if (err != gpuSuccess) {
+    // Clear sticky runtime error state for callers.
+    (void)gpuGetLastError();
     return false;
   }
-#if defined(__HIP_PLATFORM_AMD__) || \
-    (defined(CUDART_VERSION) && CUDART_VERSION >= 10000)
-  return attr.type == cudaMemoryTypeHost;
-#else
-  return attr.memoryType == cudaMemoryTypeHost;
-#endif
+  return gpuMemTypeOf(attr) == gpuMemoryTypeHost;
+}
+
+uccl::rdma::GpuRegistrationMode gpu_registration_mode() {
+  static uccl::rdma::GpuRegistrationMode const mode = [] {
+    try {
+      return uccl::rdma::parse_gpu_registration_mode(
+          getenv("UCCL_EP_VERBS_REG"));
+    } catch (std::exception const& error) {
+      fprintf(stderr, "[RDMA] FATAL: %s\n", error.what());
+      std::abort();
+    }
+  }();
+  return mode;
+}
+
+ibv_mr* register_gpu_peermem(ibv_pd* pd, void* gpu_buf, size_t bytes,
+                             uint64_t iova, int access) {
+  ibv_mr* mr = ibv_reg_mr_iova2(pd, gpu_buf, bytes, iova, access);
+  if (!mr) mr = ibv_reg_mr(pd, gpu_buf, bytes, access);
+  return mr;
 }
 
 char const* rdma_hca_filter_from_env() {
@@ -443,7 +445,7 @@ void per_thread_rdma_init(ProxyCtx& S, void* gpu_buf, size_t bytes, int rank,
     exit(1);
   }
   int nic_affinity_rank = nic_local_rank;
-  cudaSetDevice(device_index);  // Needed.
+  GPU_RT_CHECK(gpuSetDevice(device_index));
 
   // Map the local affinity rank to its PCI BDF for NIC/NUMA selection.
   auto all_gpu_bdfs = uccl::enumerate_all_gpu_bdfs();
@@ -685,38 +687,57 @@ void per_thread_rdma_init(ProxyCtx& S, void* gpu_buf, size_t bytes, int rank,
   // Host-pinned (cudaHostAlloc/cudaMallocHost) buffers should be registered as
   // host memory directly. This path is used as a fallback on NICs where GPU MR
   // registration fails (e.g. "Bad address").
-  bool const gpu_buf_is_host_ptr = is_cuda_host_pointer(gpu_buf);
+  bool const gpu_buf_is_host_ptr = is_gpu_host_pointer(gpu_buf);
   if (gpu_buf_is_host_ptr) {
     S.mr = ibv_reg_mr(S.pd, gpu_buf, bytes, access_flags);
     if (!S.mr) {
       perror("Host MR registration failed");
     }
   } else {
+    auto const registration_mode = gpu_registration_mode();
+    char const* registration_path = nullptr;
 #ifdef USE_DMABUF
-    // Try full-buffer DMA-BUF first; if that fails due to IOMMU mapping
-    // resource exhaustion (ENOMEM for buffers > 2 GiB under full IOMMU
-    // translation), fall back to chunked registration.
-    S.mr = reg_mr_gpu_dmabuf(S.pd, gpu_buf, bytes, iova, access_flags);
-    if (!S.mr) {
-      S.gpu_mr_chunks = reg_mr_gpu_dmabuf_chunked(
-          S.pd, gpu_buf, bytes, iova, access_flags, kMaxDmabufChunkSize);
-      if (S.gpu_mr_chunks.empty()) {
-        fprintf(stderr,
-                "[RDMA] FATAL: Both single and chunked DMA-BUF registration "
-                "failed for %.1f GiB buffer\n",
-                bytes / (1024.0 * 1024.0 * 1024.0));
-        exit(1);
+    if (registration_mode != uccl::rdma::GpuRegistrationMode::PeerMemory) {
+      S.mr = reg_mr_gpu_dmabuf(S.pd, gpu_buf, bytes, iova, access_flags);
+      if (!S.mr) {
+        S.gpu_mr_chunks = reg_mr_gpu_dmabuf_chunked(
+            S.pd, gpu_buf, bytes, iova, access_flags, kMaxDmabufChunkSize);
+        if (!S.gpu_mr_chunks.empty()) {
+          S.mr = S.gpu_mr_chunks[0].mr;
+        }
       }
-      S.mr = S.gpu_mr_chunks[0].mr;  // first chunk for backward compat
+      if (S.mr) registration_path = "dmabuf";
     }
 #else
-    S.mr = ibv_reg_mr_iova2(S.pd, gpu_buf, bytes, iova, access_flags);
+    if (registration_mode == uccl::rdma::GpuRegistrationMode::DmaBuf) {
+      fprintf(stderr,
+              "[RDMA] FATAL: UCCL_EP_VERBS_REG=dmabuf requires a binary "
+              "built with USE_DMABUF=1\n");
+      signal_failure();
+      exit(1);
+    }
 #endif
-    // Fallback when iova2/dmabuf fails (e.g. "Bad address" on some RoCE NICs
-    // or NICs without nvidia_peermem where the driver cannot use GPU VA as
-    // IOVA).
-    if (!S.mr) {
-      S.mr = ibv_reg_mr(S.pd, gpu_buf, bytes, access_flags);
+
+    if (!S.mr &&
+        registration_mode != uccl::rdma::GpuRegistrationMode::DmaBuf) {
+      S.mr =
+          register_gpu_peermem(S.pd, gpu_buf, bytes, iova, access_flags);
+      if (S.mr) registration_path = "peermem";
+    }
+    if (!S.mr &&
+        registration_mode == uccl::rdma::GpuRegistrationMode::DmaBuf) {
+      fprintf(stderr,
+              "[RDMA] FATAL: strict DMA-BUF registration failed for %p/%zu; "
+              "peer-memory fallback is disabled\n",
+              gpu_buf, bytes);
+    }
+    if (S.mr) {
+      fprintf(stderr,
+              "[RDMA] GPU MR registration path=%s requested=%s addr=%p "
+              "bytes=%zu\n",
+              registration_path,
+              uccl::rdma::gpu_registration_mode_name(registration_mode),
+              gpu_buf, bytes);
     }
   }
   if (!S.mr) {
@@ -759,17 +780,17 @@ bool probe_gpu_memory_registration(int gpu_idx, size_t bytes, char const* label,
                                    ProbeFn&& probe_fn) {
   size_t const probe_bytes = std::max<size_t>(bytes, 4096);
 
-  cudaError_t cuerr = cudaSetDevice(gpu_idx);
-  if (cuerr != cudaSuccess) return false;
+  gpuError_t gpu_error = gpuSetDevice(gpu_idx);
+  if (gpu_error != gpuSuccess) return false;
 
   void* probe_buf = nullptr;
-  cuerr = cudaMalloc(&probe_buf, probe_bytes);
-  if (cuerr != cudaSuccess || !probe_buf) return false;
+  gpu_error = gpuMalloc(&probe_buf, probe_bytes);
+  if (gpu_error != gpuSuccess || !probe_buf) return false;
 
   int num_devices = 0;
   struct ibv_device** dev_list = ibv_get_device_list(&num_devices);
   if (!dev_list || num_devices == 0) {
-    cudaFree(probe_buf);
+    gpuFree(probe_buf);
     if (dev_list) ibv_free_device_list(dev_list);
     return false;
   }
@@ -812,7 +833,7 @@ bool probe_gpu_memory_registration(int gpu_idx, size_t bytes, char const* label,
     if (!ok) break;
   }
 
-  cudaFree(probe_buf);
+  gpuFree(probe_buf);
   ibv_free_device_list(dev_list);
   return ok;
 }
@@ -895,8 +916,10 @@ bool has_any_nic() {
 }
 
 bool can_register_gpu_memory_for_rdma(int gpu_idx, size_t bytes) {
-  static thread_local std::map<std::pair<int, size_t>, bool> cache;
-  auto const key = std::make_pair(gpu_idx, bytes);
+  static thread_local std::map<std::tuple<int, size_t, int>, bool> cache;
+  auto const mode = gpu_registration_mode();
+  auto const key =
+      std::make_tuple(gpu_idx, bytes, static_cast<int>(mode));
   auto const it = cache.find(key);
   if (it != cache.end()) return it->second;
 
@@ -913,14 +936,19 @@ bool can_register_gpu_memory_for_rdma(int gpu_idx, size_t bytes) {
       [&](ibv_pd* pd, void* probe_buf, size_t probe_bytes) {
         uint64_t const iova = reinterpret_cast<uintptr_t>(probe_buf);
 #ifdef USE_DMABUF
-        ibv_mr* mr =
-            reg_mr_gpu_dmabuf(pd, probe_buf, probe_bytes, iova, access);
+        ibv_mr* mr = nullptr;
         std::vector<MRChunk> chunks;
-        if (!mr) {
-          chunks = reg_mr_gpu_dmabuf_chunked(pd, probe_buf, probe_bytes, iova,
-                                             access, kMaxDmabufChunkSize);
-          if (!chunks.empty()) mr = chunks[0].mr;
+        if (mode != uccl::rdma::GpuRegistrationMode::PeerMemory) {
+          mr = reg_mr_gpu_dmabuf(pd, probe_buf, probe_bytes, iova, access);
+          if (!mr) {
+            chunks = reg_mr_gpu_dmabuf_chunked(
+                pd, probe_buf, probe_bytes, iova, access,
+                kMaxDmabufChunkSize);
+            if (!chunks.empty()) mr = chunks[0].mr;
+          }
         }
+        if (!mr && mode != uccl::rdma::GpuRegistrationMode::DmaBuf)
+          mr = register_gpu_peermem(pd, probe_buf, probe_bytes, iova, access);
         if (!mr) return false;
         if (!chunks.empty()) {
           for (auto& c : chunks) ibv_dereg_mr(c.mr);
@@ -929,8 +957,9 @@ bool can_register_gpu_memory_for_rdma(int gpu_idx, size_t bytes) {
         }
         return true;
 #else
-        ibv_mr* mr = ibv_reg_mr_iova2(pd, probe_buf, probe_bytes, iova, access);
-        if (!mr) mr = ibv_reg_mr(pd, probe_buf, probe_bytes, access);
+        if (mode == uccl::rdma::GpuRegistrationMode::DmaBuf) return false;
+        ibv_mr* mr =
+            register_gpu_peermem(pd, probe_buf, probe_bytes, iova, access);
         if (!mr) return false;
         ibv_dereg_mr(mr);
         return true;
@@ -938,6 +967,35 @@ bool can_register_gpu_memory_for_rdma(int gpu_idx, size_t bytes) {
       });
   cache[key] = result;
   return result;
+}
+
+ibv_mr* register_control_buffer_mr(ibv_pd* pd, void* buffer, size_t bytes,
+                                   int access) {
+  if (is_gpu_host_pointer(buffer))
+    return ibv_reg_mr(pd, buffer, bytes, access);
+
+  auto const mode = gpu_registration_mode();
+  uint64_t const iova = reinterpret_cast<uintptr_t>(buffer);
+  ibv_mr* mr = nullptr;
+#ifdef USE_DMABUF
+  if (mode != uccl::rdma::GpuRegistrationMode::PeerMemory)
+    mr = reg_mr_gpu_dmabuf(pd, buffer, bytes, iova, access);
+#else
+  if (mode == uccl::rdma::GpuRegistrationMode::DmaBuf) {
+    fprintf(stderr,
+            "[RDMA] strict DMA-BUF control-buffer registration requires "
+            "USE_DMABUF=1\n");
+    return nullptr;
+  }
+#endif
+  if (!mr && mode != uccl::rdma::GpuRegistrationMode::DmaBuf)
+    mr = register_gpu_peermem(pd, buffer, bytes, iova, access);
+  if (mr) {
+    fprintf(stderr,
+            "[RDMA] control MR registration requested=%s addr=%p bytes=%zu\n",
+            uccl::rdma::gpu_registration_mode_name(mode), buffer, bytes);
+  }
+  return mr;
 }
 
 bool can_register_gpu_memory_for_atomics(int gpu_idx) {
@@ -976,7 +1034,8 @@ bool can_register_gpu_memory_for_atomics(int gpu_idx) {
   bool const result = probe_gpu_memory_registration(
       gpu_idx, kAtomicBufferSize, "atomic buffer",
       [&](ibv_pd* pd, void* probe_buf, size_t probe_bytes) {
-        ibv_mr* mr = ibv_reg_mr(pd, probe_buf, probe_bytes, access);
+        ibv_mr* mr =
+            register_control_buffer_mr(pd, probe_buf, probe_bytes, access);
         if (!mr) return false;
         ibv_dereg_mr(mr);
         return true;

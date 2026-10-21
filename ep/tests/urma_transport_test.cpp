@@ -158,7 +158,7 @@ urma_target_seg_t* urma_register_seg(urma_context_t* c, urma_seg_cfg_t* cfg) {
   if (!cfg->token_id || !cfg->flag.bs.token_id_valid) return nullptr;
   bool gpu = gpu_ptrs.count(reinterpret_cast<void*>(cfg->va));
   if (gpu != bool(cfg->is_gpu_seg) || cfg->flag.bs.non_pin) return nullptr;
-#ifndef USE_URMA_METAX
+#ifndef USE_METAX
   if (gpu && !sync_ptrs.count(reinterpret_cast<void*>(cfg->va))) return nullptr;
 #endif
   if (gpu) ++gpu_regs;
@@ -245,7 +245,7 @@ int main() {
   assert(init_count == 0 && resources == 0);
   alignas(65536) uint64_t a[32]{}, b[32]{};
   alignas(4096) uint64_t ac[8]{}, bc[8]{};
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   gpu_ptrs = {a, b, ac, bc};
   host_ptrs.clear();
 #else
@@ -256,16 +256,16 @@ int main() {
     UrmaTransport left, right;
     left.init(ctx);
     right.init(ctx);
-#ifndef USE_URMA_METAX
+#ifndef USE_METAX
     rejects([&] { left.register_main_buffer(ac, sizeof(ac), 2); });
     rejects([&] { left.register_main_buffer(a, sizeof(a), 0); });
 #endif
     left.register_main_buffer(a, sizeof(a), 2);
     right.register_main_buffer(b, sizeof(b), 2);
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
     assert(sync_ptrs.empty());
 #endif
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
     assert(gpu_regs == 2);
 #else
     assert(selected_device == 2 && gpu_regs == 2);
@@ -333,7 +333,7 @@ int main() {
     auto main_owner = UrmaTransport::acquire_buffer_ownership(a, false, 2);
     auto control_owner = UrmaTransport::acquire_buffer_ownership(
         ac,
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
         false,
 #else
         true,
@@ -349,13 +349,13 @@ int main() {
     first.destroy();
     main_owner.reset();
     control_owner.reset();
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
     assert(gpu_frees == 0 && host_frees == 0 && gpu_regs == 2);
 #else
     assert(gpu_frees == 0 && host_frees == 0 && gpu_regs == 1);
 #endif
     last.destroy();
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
     assert(gpu_frees == 0 && host_frees == 0 && gpu_regs == 0);
 #else
     assert(gpu_frees == 1 && host_frees == 1 && gpu_regs == 0);
@@ -370,11 +370,11 @@ int main() {
     t.register_main_buffer(a, sizeof(a), 2);
     t.destroy();
     proxy_owner.reset();
-#ifndef USE_URMA_METAX
+#ifndef USE_METAX
     assert(gpu_frees == 1);
 #endif
     tensor_owner.reset();
-#ifndef USE_URMA_METAX
+#ifndef USE_METAX
     assert(gpu_frees == 2);
 #endif
   }

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
 #include <dlfcn.h>
 #else
 #include <cuda.h>
@@ -20,7 +20,7 @@
 namespace uccl::gpu_p2p {
 namespace {
 
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
 constexpr int kMcSuccess = 0;
 constexpr int kMcMemcpyHostToDevice = 1;
 constexpr int kMcMemcpyDeviceToHost = 2;
@@ -137,7 +137,7 @@ void check_cuda(cudaError_t status, char const* operation) {
 }  // namespace
 
 Vendor vendor() {
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   return Vendor::MetaX;
 #else
   return Vendor::Nvidia;
@@ -149,7 +149,7 @@ char const* vendor_name() {
 }
 
 std::size_t registration_alignment() {
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   return 4 * 1024;
 #else
   return 64 * 1024;
@@ -157,7 +157,7 @@ std::size_t registration_alignment() {
 }
 
 bool atomic_buffer_is_gpu_memory() {
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   return true;
 #else
   return false;
@@ -166,7 +166,7 @@ bool atomic_buffer_is_gpu_memory() {
 
 void set_device(int device) {
   if (device < 0) throw std::invalid_argument("invalid GPU device ordinal");
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   auto& api = metax();
   if (api.get_device_count) {
     int count = 0;
@@ -184,7 +184,7 @@ void* allocate_device(std::size_t bytes, int device) {
   if (bytes == 0) throw std::invalid_argument("zero-sized GPU allocation");
   set_device(device);
   void* ptr = nullptr;
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   check_mc(metax().malloc(&ptr, bytes), "mcMalloc");
   if (!ptr) throw std::runtime_error("mcMalloc returned a null pointer");
   remember_allocation(ptr, device);
@@ -195,7 +195,7 @@ void* allocate_device(std::size_t bytes, int device) {
 }
 
 void* allocate_atomic_buffer(std::size_t bytes, int device) {
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   std::size_t const alignment = registration_alignment();
   if (bytes > static_cast<std::size_t>(-1) - (alignment - 1))
     throw std::overflow_error("MetaX atomic allocation size overflow");
@@ -217,7 +217,7 @@ void zero_memory(void* ptr, std::size_t bytes, MemoryKind kind, int device) {
     return;
   }
   set_device(device);
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   constexpr std::size_t kChunkBytes = 1024 * 1024;
   std::vector<unsigned char> zeros(std::min(bytes, kChunkBytes), 0);
   auto* out = static_cast<unsigned char*>(ptr);
@@ -236,7 +236,7 @@ void copy_device_to_host(void* host, void const* device_ptr, std::size_t bytes,
                          int device) {
   if (!host || !device_ptr) throw std::invalid_argument("null copy pointer");
   set_device(device);
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   check_mc(metax().memcpy(host, device_ptr, bytes, kMcMemcpyDeviceToHost),
            "mcMemcpy(D2H)");
 #else
@@ -249,7 +249,7 @@ void copy_host_to_device(void* device_ptr, void const* host, std::size_t bytes,
                          int device) {
   if (!host || !device_ptr) throw std::invalid_argument("null copy pointer");
   set_device(device);
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   check_mc(metax().memcpy(device_ptr, host, bytes, kMcMemcpyHostToDevice),
            "mcMemcpy(H2D)");
 #else
@@ -261,7 +261,7 @@ void copy_host_to_device(void* device_ptr, void const* host, std::size_t bytes,
 void prepare_main_buffer(void* ptr, std::size_t bytes, int device) {
   if (!ptr || bytes == 0) throw std::invalid_argument("invalid main GPU buffer");
   set_device(device);
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   validate_known_device(ptr, device);
 #else
   cudaPointerAttributes attr{};
@@ -282,7 +282,7 @@ void prepare_atomic_buffer(void* ptr, std::size_t bytes, int device) {
   if (!ptr || bytes == 0)
     throw std::invalid_argument("invalid atomic control buffer");
   set_device(device);
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   validate_known_device(ptr, device);
 #else
   cudaPointerAttributes attr{};
@@ -297,7 +297,7 @@ void prepare_atomic_buffer(void* ptr, std::size_t bytes, int device) {
 
 void release_memory(void* ptr, MemoryKind kind, int device) {
   if (!ptr) return;
-#ifdef USE_URMA_METAX
+#ifdef USE_METAX
   if (kind != MemoryKind::Device)
     throw std::invalid_argument("MetaX URMA owns device allocations only");
   set_device(device);

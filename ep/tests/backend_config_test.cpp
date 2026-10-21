@@ -13,7 +13,7 @@ int main() {
   assert(!ep_uses_urma());
   setenv("UCCL_EP_TRANSPORT", "urma", 1);
 #if defined(USE_URMA) && !defined(USE_SUBSET_BARRIER) && \
-    (!defined(__HIPCC__) || defined(USE_URMA_METAX))
+    (!defined(__HIPCC__) || defined(USE_METAX))
   assert(ep_uses_urma());
 #else
   bool rejected = false;

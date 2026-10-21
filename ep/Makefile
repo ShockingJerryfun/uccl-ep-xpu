@@ -1,9 +1,23 @@
+USE_METAX ?= 0
 USE_URMA_METAX ?= 0
-MACA_PATH ?= /opt/maca
+# Backward compatibility for the original URMA-only MetaX switch.
 ifeq ($(USE_URMA_METAX),1)
+  USE_METAX := 1
+endif
+MACA_PATH ?= /opt/maca
+ifeq ($(USE_METAX),1)
   CUDA_PATH ?= $(MACA_PATH)/tools/cu-bridge
 else
   CUDA_PATH ?= /usr/local/cuda
+endif
+
+ifeq ($(USE_METAX),1)
+  $(info MetaX MACA platform enabled)
+  METAX_CFLAGS := -DUSE_METAX -DDISABLE_SM90_FEATURES -DDISABLE_AGGRESSIVE_PTX_INSTRS
+  METAX_LDFLAGS := -ldl
+else
+  METAX_CFLAGS :=
+  METAX_LDFLAGS :=
 endif
 CXX       := /usr/bin/g++
 NVCC      := $(CUDA_PATH)/bin/nvcc
@@ -19,7 +33,8 @@ else
   EFA_LDFLAGS := -L$(EFA_HOME)/lib -lefa
 endif
 
-# DMA-BUF avoids nvidia_peermem/efa_nv_peermem. Enable with USE_DMABUF=1.
+# Compile CUDA/MACA DMA-BUF export and ibv_reg_dmabuf_mr support.
+# UCCL_EP_VERBS_REG selects auto, peermem, or dmabuf at runtime.
 USE_DMABUF ?= 0
 ifeq ($(USE_DMABUF),1)
   $(info DMA-BUF GPU memory registration enabled)
@@ -44,16 +59,12 @@ else
   CXI_LDFLAGS :=
 endif
 
-# URMA GPU P2P uses the tested UMDK is_gpu_seg ABI. Set
-# USE_URMA_METAX=1 for the MetaX MACA runtime and 4 KiB registration pages.
+# URMA GPU P2P uses the tested UMDK is_gpu_seg ABI. GPU selection is controlled
+# independently by USE_METAX; USE_URMA_METAX remains a legacy alias.
 USE_URMA ?= 0
 ifeq ($(USE_URMA),1)
   URMA_CFLAGS := -DUSE_URMA
   URMA_LDFLAGS := -lurma
-  ifeq ($(USE_URMA_METAX),1)
-    URMA_CFLAGS += -DUSE_URMA_METAX
-    URMA_LDFLAGS += -ldl
-  endif
   ifdef UMDK_HOME
     URMA_CFLAGS += -I$(UMDK_HOME)/include
     URMA_LDFLAGS += -L$(UMDK_HOME)/lib64 -L$(UMDK_HOME)/lib
@@ -69,7 +80,11 @@ else ifeq ($(USE_URMA_METAX),1)
 endif
 
 ARCH := $(shell uname -m)
+ifeq ($(USE_METAX),1)
+GPU_NAME ?= MetaX
+else
 GPU_NAME ?= $(shell nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
+endif
 CPU_IS_ARM64 := 0
 GPU_IS_HOPPER := 0
 ifeq ($(ARCH),aarch64)
@@ -119,7 +134,7 @@ INSTALL_DIR          := $(PYTHON_SITE_PACKAGES)/uccl
 
 # GPU arch (auto-detected, override with: make SM=90). MACA cu-bridge accepts
 # CUDA-compatible SM flags; C500 exposes compute capability 9.0.
-ifeq ($(USE_URMA_METAX),1)
+ifeq ($(USE_METAX),1)
 DETECTED_SM := 90
 else
 DETECTED_SM := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1 | tr -d '.')
@@ -155,10 +170,10 @@ ifdef MAX_NUM_GPUS
 endif
 
 
-CXXFLAGS  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(NORMAL_CFLAGS)
-NVCCFLAGS += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(NORMAL_CFLAGS)
-LDFLAGS   += $(EFA_LDFLAGS) $(CXI_LDFLAGS) $(URMA_LDFLAGS)
-INCLUDES  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(NORMAL_CFLAGS)
+CXXFLAGS  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(METAX_CFLAGS) $(NORMAL_CFLAGS)
+NVCCFLAGS += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(METAX_CFLAGS) $(NORMAL_CFLAGS)
+LDFLAGS   += $(EFA_LDFLAGS) $(CXI_LDFLAGS) $(URMA_LDFLAGS) $(METAX_LDFLAGS)
+INCLUDES  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(METAX_CFLAGS) $(NORMAL_CFLAGS)
 
 SRC_CPP := src/proxy.cpp src/rdma.cpp src/common.cpp src/uccl_proxy.cpp src/uccl_bench.cpp src/fifo.cpp src/cxi_transport.cpp src/gpu_p2p_runtime.cpp src/urma_transport.cpp
 SRC_CU  := src/bench_kernel.cu src/internode_ll.cu src/internode.cu src/layout.cu src/intranode.cu src/ep_runtime.cu
