@@ -1,6 +1,7 @@
 #include "bench_kernel.cuh"
 #include "bench_utils.hpp"
 #include "common.hpp"
+#include "ep_backend.hpp"
 #include "d2h_queue_device.cuh"
 #include "ep_config.hpp"
 #include "ep_configs.cuh"
@@ -200,6 +201,7 @@ struct RdmaBufferDlpack {
   std::size_t bytes{0};
   int device_index{0};
   bool is_host_allocated{false};
+  std::shared_ptr<void> urma_allocation;
 };
 
 void free_rdma_raw_buffer(void* ptr, int device_index, bool is_host_allocated) {
@@ -227,8 +229,12 @@ void rdma_buffer_dlpack_deleter(DLManagedTensor* managed) {
   if (!managed) return;
   auto* ctx = static_cast<RdmaBufferDlpack*>(managed->manager_ctx);
   if (!ctx) return;
-  free_rdma_raw_buffer_nothrow(ctx->ptr, ctx->device_index,
-                               ctx->is_host_allocated);
+  if (ctx->urma_allocation) {
+    ctx->urma_allocation.reset();
+  } else {
+    free_rdma_raw_buffer_nothrow(ctx->ptr, ctx->device_index,
+                                 ctx->is_host_allocated);
+  }
   delete ctx;
 }
 
@@ -247,18 +253,27 @@ nb::object make_rdma_buffer_dlpack_capsule(void* ptr, std::size_t bytes,
   ctx->bytes = bytes;
   ctx->device_index = device_index;
   ctx->is_host_allocated = is_host_allocated;
+  try {
+    if (ep_uses_urma()) {
+      ctx->urma_allocation = UrmaTransport::acquire_buffer_ownership(
+          ptr, is_host_allocated, device_index);
+    }
+  } catch (...) {
+    delete ctx;
+    throw;
+  }
   ctx->shape[0] = static_cast<int64_t>(bytes);
   ctx->managed.manager_ctx = ctx;
   ctx->managed.deleter = rdma_buffer_dlpack_deleter;
   ctx->managed.dl_tensor.data = ptr;
   ctx->managed.dl_tensor.device = {
-    is_host_allocated ? kDLCPU
+      is_host_allocated ? kDLCPU
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-                      : kDLROCM,
+                        : kDLROCM,
 #else
-                      : kDLCUDA,
+                        : kDLCUDA,
 #endif
-    is_host_allocated ? 0 : device_index,
+      is_host_allocated ? 0 : device_index,
   };
   ctx->managed.dl_tensor.ndim = 1;
   ctx->managed.dl_tensor.dtype = {kDLUInt, 8, 1};
@@ -282,20 +297,28 @@ std::tuple<nb::object, bool> allocate_rdma_buffer_dlpack(
   bool is_host_allocated = false;
   void* ptr = nullptr;
 
+  bool const use_urma = ep_uses_urma();
   CUDA_CHECK(cudaSetDevice(device_index));
+  std::size_t backing_bytes = alloc_bytes;
+  if (use_urma) {
+    constexpr std::size_t alignment = 64 * 1024;
+    if (alloc_bytes > SIZE_MAX - (alignment - 1))
+      throw std::overflow_error("URMA allocation size overflow");
+    backing_bytes = (alloc_bytes + alignment - 1) & ~(alignment - 1);
+  }
 
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   CUDA_CHECK(hipExtMallocWithFlags(&ptr, alloc_bytes, hipDeviceMallocUncached));
   CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
 #elif defined(EFA) || defined(USE_DMABUF)
-  CUDA_CHECK(cudaMalloc(&ptr, alloc_bytes));
+  CUDA_CHECK(cudaMalloc(&ptr, backing_bytes));
   CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
 #else
   bool const use_host_alloc =
-      !force_device_alloc && num_rdma_bytes > 0 && has_any_nic() &&
+      !use_urma && !force_device_alloc && num_rdma_bytes > 0 && has_any_nic() &&
       !can_register_gpu_memory_for_rdma(device_index, num_rdma_bytes);
   if (!use_host_alloc) {
-    CUDA_CHECK(cudaMalloc(&ptr, alloc_bytes));
+    CUDA_CHECK(cudaMalloc(&ptr, backing_bytes));
     CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
   } else {
     CUDA_CHECK(cudaMallocHost(&ptr, alloc_bytes));
@@ -1536,6 +1559,11 @@ class Buffer {
     EP_HOST_ASSERT(atomic_buffer_ptr != nullptr &&
                    "set_atomic_buffer must be called before requesting "
                    "atomic IPC handle");
+    if (ep_uses_urma()) {
+      throw std::runtime_error(
+          "URMA uses mapped host memory for atomic control state; CUDA IPC "
+          "handles are unavailable for this buffer");
+    }
     cudaIpcMemHandle_t h{};
     CUDA_CHECK(cudaIpcGetMemHandle(&h, atomic_buffer_ptr));
     return nb::bytes(reinterpret_cast<char const*>(h.reserved),
@@ -1932,6 +1960,8 @@ NB_MODULE(ep, m) {
   m.def(
       "can_register_rdma_gpu_buffer",
       [](int device_index, std::size_t num_bytes) {
+        // URMA policy: keep device memory; actual registration is fail-fast.
+        if (ep_uses_urma()) return true;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || defined(EFA)
         return true;
 #else
@@ -1949,6 +1979,7 @@ NB_MODULE(ep, m) {
   m.def(
       "rdma_buffer_should_use_host_alloc",
       [](int device_index, std::size_t num_bytes) {
+        if (ep_uses_urma()) return false;
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || defined(EFA)
         return false;
 #else

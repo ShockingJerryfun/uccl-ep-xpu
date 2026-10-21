@@ -66,8 +66,9 @@ struct RDMAConnectionInfo {
 #endif
 
 #ifdef USE_URMA
-  // URMA connection blobs — serialized urma_rjetty_t / urma_seg_t objects
-  // exchanged verbatim over the existing TCP bootstrap.
+  // P2P SDK native descriptors; no local pointers/handles. Same ABI/build
+  // required at both ends. Version rejects the previous opaque-blob format.
+  uint32_t urma_wire_version = 0;
   static constexpr uint32_t kMaxUrmaBlob = 2048;
   uint32_t urma_rjetty_len = 0;
   uint8_t urma_rjetty[kMaxUrmaBlob] = {};

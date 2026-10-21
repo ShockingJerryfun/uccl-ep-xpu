@@ -1,4 +1,5 @@
 #include "proxy.hpp"
+#include "ep_backend.hpp"
 #include "bench_utils.hpp"
 #include "d2h_queue_host.hpp"
 #include "ep_util.hpp"
@@ -108,7 +109,7 @@ void unmap_local_barrier_shm(std::string const& name, LocalBarrier* lb,
 Proxy::Proxy(Config const& cfg) : cfg_(cfg) {
   char const* transport = std::getenv("UCCL_EP_TRANSPORT");
   use_cxi_transport_ = transport && std::string(transport) == "cxi";
-  use_urma_transport_ = transport && std::string(transport) == "urma";
+  use_urma_transport_ = ep_uses_urma();
 
   if (get_cpu_affinity_disabled()) {
     cfg_.pin_thread = false;
@@ -377,6 +378,16 @@ void Proxy::init_common() {
           "UCCL_EP_TRANSPORT=urma requires atomic_buffer_ptr to be set");
     }
 
+    if (cfg_.thread_idx == 0 && !urma_main_allocation_) {
+      urma_main_allocation_ = UrmaTransport::acquire_buffer_ownership(
+          cfg_.gpu_buffer, cfg_.free_buffer_with_cuda_free_host,
+          cfg_.device_index);
+    }
+
+    // Device selection follows the NIC-local ordinal. Barrier setup below
+    // restores the node-local barrier ordinal before using ctx_.local_rank.
+    ctx_.local_rank = cfg_.nic_local_rank;
+
     int num_ranks = ctxs_for_all_ranks_.size();
     local_infos_.assign(num_ranks, RDMAConnectionInfo{});
     remote_infos_.assign(num_ranks, RDMAConnectionInfo{});
@@ -389,9 +400,9 @@ void Proxy::init_common() {
       auto transport = std::make_unique<UrmaTransport>();
       transport->init(ctx_);
       transport->register_main_buffer(cfg_.gpu_buffer, cfg_.total_size,
-                                      cfg_.local_rank);
+                                      cfg_.device_index);
       transport->register_atomic_buffer(atomic_buffer_ptr_, kAtomicBufferSize,
-                                        cfg_.local_rank);
+                                        cfg_.device_index);
       local_infos_[peer] = transport->local_info();
       if (!urma_transport_) urma_transport_ = transport.get();
       urma_transports_by_rank_[peer] = std::move(transport);
@@ -434,7 +445,10 @@ void Proxy::init_common() {
       }
       ctx_.num_local_ranks = static_cast<int>(local_ranks.size());
       ctx_.node_leader_rank = leader_rank;
-      ctx_.local_rank = cfg_.local_rank;
+      ctx_.local_rank = cfg_.barrier_local_rank >= 0 ? cfg_.barrier_local_rank
+                                                     : cfg_.local_rank;
+      if (ctx_.local_rank < 0 || ctx_.local_rank >= ctx_.num_local_ranks)
+        throw std::runtime_error("URMA barrier local rank out of range");
       ctx_.thread_idx = cfg_.thread_idx;
 
       if (ctx_.num_local_ranks > UCCL_MAX_LOCAL_RANKS) {
@@ -1233,15 +1247,9 @@ void Proxy::poll_urma_completions() {
     if (completions[i].status != 0) {
       throw std::runtime_error("URMA completion returned non-zero status");
     }
-#ifdef USE_LIBFABRIC_CXI
     if (completions[i].wr_id != kUrmaInternalWrId) {
       acked_wrs_.insert(completions[i].wr_id);
     }
-#else
-    if (completions[i].wr_id != 0) {
-      acked_wrs_.insert(completions[i].wr_id);
-    }
-#endif
   }
   if (static_cast<size_t>(ne) > urma_outstanding_ops_) {
     throw std::runtime_error("URMA completion count exceeded outstanding ops");
@@ -1250,71 +1258,93 @@ void Proxy::poll_urma_completions() {
   if (ne > 0) adaptive_sleeper_.update_timer();
 }
 
-void Proxy::post_urma_commands(std::vector<uint64_t> const& wrs_to_post,
-                              std::vector<TransferCmd> const& cmds_to_post) {
-  if (!urma_transport_) {
-    throw std::runtime_error("URMA transport has not been initialized");
+void Proxy::ensure_urma_capacity(size_t count) {
+  size_t const limit =
+      std::min<size_t>(kMaxOutstandingSends, ProxyCtx::kMaxAtomicOps);
+  if (count > limit)
+    throw std::runtime_error("URMA batch exceeds queue capacity");
+  auto const deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (urma_outstanding_ops_ > limit - count) {
+    poll_urma_completions();
+    if (std::chrono::steady_clock::now() >= deadline)
+      throw std::runtime_error("URMA completion timeout");
+    cpu_relax();
   }
+}
+
+void Proxy::post_urma_commands(std::vector<uint64_t> const& wrs_to_post,
+                               std::vector<TransferCmd> const& cmds_to_post) {
   if (wrs_to_post.size() != cmds_to_post.size()) {
     throw std::runtime_error("URMA command/wr_id size mismatch");
   }
 
-  for (size_t i = 0; i < cmds_to_post.size(); ++i) {
-    auto const& cmd = cmds_to_post[i];
-    int const dst_rank = static_cast<int>(cmd.dst_rank);
-    UrmaTransport* transport = urma_transport_for_rank(dst_rank);
-    switch (get_base_cmd(cmd.cmd_type)) {
-      case CmdType::WRITE: {
-        if (!transport) {
-          throw std::runtime_error(
-              "URMA destination transport is not initialized");
-        }
-        bool const low_latency = !cfg_.use_normal_mode;
-        uint64_t const local_offset =
-            decode_write_offset(cmd.req_lptr, low_latency);
-        uint64_t const remote_offset =
-            decode_write_offset(cmd.req_rptr, low_latency);
-        bool const has_signaling_atomic =
-            cfg_.use_normal_mode && cmd.atomic_offset > 0 && cmd.atomic_val > 0;
-        transport->post_write(
-            dst_rank, has_signaling_atomic ? kUrmaInternalWrId : wrs_to_post[i],
-            local_offset, remote_offset, cmd.bytes, low_latency);
-        ++urma_outstanding_ops_;
-
-        if (has_signaling_atomic) {
-          transport->post_atomic_add(
-              dst_rank, wrs_to_post[i], cmd.atomic_offset,
-              static_cast<int64_t>(cmd.atomic_val), /*fence=*/true);
+  // Submit all collected data before acknowledging cross-ring control commands.
+  for (int phase = 0; phase < 2; ++phase) {
+    for (size_t i = 0; i < cmds_to_post.size(); ++i) {
+      auto const& cmd = cmds_to_post[i];
+      auto const type = get_base_cmd(cmd.cmd_type);
+      bool const control = type == CmdType::QUIET || type == CmdType::BARRIER;
+      if (control != (phase == 1)) continue;
+      int const dst_rank = static_cast<int>(cmd.dst_rank);
+      UrmaTransport* transport = urma_transport_for_rank(dst_rank);
+      switch (get_base_cmd(cmd.cmd_type)) {
+        case CmdType::WRITE: {
+          if (!transport) {
+            throw std::runtime_error(
+                "URMA destination transport is not initialized");
+          }
+          bool const low_latency = !cfg_.use_normal_mode;
+          uint64_t const local_offset =
+              decode_write_offset(cmd.req_lptr, low_latency);
+          uint64_t const remote_offset =
+              decode_write_offset(cmd.req_rptr, low_latency);
+          bool const has_signaling_atomic = cfg_.use_normal_mode &&
+                                            cmd.atomic_offset > 0 &&
+                                            cmd.atomic_val > 0;
+          ensure_urma_capacity(has_signaling_atomic ? 2 : 1);
+          transport->post_write(
+              dst_rank,
+              has_signaling_atomic ? kUrmaInternalWrId : wrs_to_post[i],
+              local_offset, remote_offset, cmd.bytes, low_latency);
           ++urma_outstanding_ops_;
+
+          if (has_signaling_atomic) {
+            transport->post_atomic_add(
+                dst_rank, wrs_to_post[i], cmd.atomic_offset,
+                static_cast<int64_t>(cmd.atomic_val), /*fence=*/true);
+            ++urma_outstanding_ops_;
+          }
+          break;
         }
-        break;
+        case CmdType::ATOMIC: {
+          if (!transport) {
+            throw std::runtime_error(
+                "URMA destination transport is not initialized");
+          }
+          ensure_urma_capacity(1);
+          int v = static_cast<int>(cmd.value);
+          if (v == kLargeAtomicValue) v = kMaxSendAtomicValue;
+          if (get_is_combine(cmd.cmd_type)) v = 1;
+          transport->post_atomic_add(
+              dst_rank, wrs_to_post[i], cmd.req_rptr,
+              static_cast<int64_t>(static_cast<int32_t>(v)), /*fence=*/true);
+          ++urma_outstanding_ops_;
+          break;
+        }
+        case CmdType::QUIET:
+          ensure_urma_capacity(
+              std::min<size_t>(kMaxOutstandingSends, ProxyCtx::kMaxAtomicOps));
+          acked_wrs_.insert(wrs_to_post[i]);
+          break;
+        case CmdType::BARRIER:
+          ensure_urma_capacity(
+              std::min<size_t>(kMaxOutstandingSends, ProxyCtx::kMaxAtomicOps));
+          send_barrier(wrs_to_post[i]);
+          break;
+        default:
+          throw std::runtime_error("Unknown URMA command type");
       }
-      case CmdType::ATOMIC: {
-        if (!transport) {
-          throw std::runtime_error(
-              "URMA destination transport is not initialized");
-        }
-        int v = static_cast<int>(cmd.value);
-        if (v == kLargeAtomicValue) v = kMaxSendAtomicValue;
-        if (get_is_combine(cmd.cmd_type)) v = 1;
-        transport->post_atomic_add(
-            dst_rank, wrs_to_post[i], cmd.req_rptr,
-            static_cast<int64_t>(static_cast<int32_t>(v)), /*fence=*/true);
-        ++urma_outstanding_ops_;
-        break;
-      }
-      case CmdType::QUIET:
-        while (urma_outstanding_ops_ > 0) {
-          poll_urma_completions();
-          if (urma_outstanding_ops_ > 0) cpu_relax();
-        }
-        acked_wrs_.insert(wrs_to_post[i]);
-        break;
-      case CmdType::BARRIER:
-        send_barrier(wrs_to_post[i]);
-        break;
-      default:
-        throw std::runtime_error("Unknown CXI command type");
     }
   }
 }
@@ -1623,26 +1653,15 @@ void Proxy::quiet(std::vector<uint64_t> wrs, std::vector<TransferCmd> cmds) {
 }
 
 void Proxy::destroy(bool free_gpu_buffer) {
-  if (urma_transport_) {
+  if (use_urma_transport()) {
     for (auto& transport : urma_transports_by_rank_) {
       if (transport) transport->destroy();
     }
     urma_transports_by_rank_.clear();
     urma_transport_ = nullptr;
     if (free_gpu_buffer && cfg_.gpu_buffer) {
-      cudaError_t e;
-      if (cfg_.free_buffer_with_cuda_free_host) {
-        e = cudaFreeHost(cfg_.gpu_buffer);
-        if (e != cudaSuccess)
-          fprintf(stderr, "[destroy] cudaFreeHost failed: %s\n",
-                  cudaGetErrorString(e));
-      } else {
-        e = cudaFree(cfg_.gpu_buffer);
-        if (e != cudaSuccess)
-          fprintf(stderr, "[destroy] cudaFree failed: %s\n",
-                  cudaGetErrorString(e));
-      }
-      if (e == cudaSuccess) cfg_.gpu_buffer = nullptr;
+      urma_main_allocation_.reset();
+      cfg_.gpu_buffer = nullptr;
     }
     acked_wrs_.clear();
     wr_id_to_start_time_.clear();
@@ -1966,7 +1985,8 @@ void Proxy::send_barrier(uint64_t wr) {
   if (ctx_.barrier_wr == -1) {
     ctx_.barrier_wr = wr;
   } else {
-    assert(use_cxi_transport() && static_cast<uint64_t>(ctx_.barrier_wr) == wr);
+    assert((use_cxi_transport() || use_urma_transport()) &&
+           static_cast<uint64_t>(ctx_.barrier_wr) == wr);
   }
   if (use_cxi_transport() || use_urma_transport()) {
     ++ctx_.barrier_seq;
@@ -2088,14 +2108,15 @@ void Proxy::barrier_check() {
       }
       if (!all_local_arrived) return;
 
-      static thread_local uint64_t last_sent_seq = 0;
-      if (last_sent_seq != seq) {
-        last_sent_seq = seq;
+      if (urma_last_barrier_sent_ != seq) {
+        urma_last_barrier_sent_ = seq;
         if (cfg_.rank != 0) {
           UrmaTransport* transport = urma_transport_for_rank(0);
           if (!transport) {
-            throw std::runtime_error("URMA barrier transport to rank 0 missing");
+            throw std::runtime_error(
+                "URMA barrier transport to rank 0 missing");
           }
+          ensure_urma_capacity(1);
           transport->post_barrier_atomic_add(
               /*dst_rank=*/0, kUrmaInternalWrId, kArrivalSlot, 1);
           ++urma_outstanding_ops_;
@@ -2116,6 +2137,7 @@ void Proxy::barrier_check() {
           if (!transport) {
             throw std::runtime_error("URMA barrier release transport missing");
           }
+          ensure_urma_capacity(1);
           transport->post_barrier_atomic_add(r, kUrmaInternalWrId, kReleaseSlot,
                                              1);
           ++urma_outstanding_ops_;

@@ -195,7 +195,19 @@ if __name__ == "__main__":
         print("Building with URMA transport support (USE_URMA)")
         cxx_flags.append("-DUSE_URMA")
         nvcc_flags.append("-DUSE_URMA")
-        libraries.append("urma")
+        libraries.extend(["urma", "cuda"])
+        if not torch.version.cuda:
+            raise RuntimeError("USE_URMA currently requires NVIDIA CUDA")
+        # UMDK_HOME is an installed SDK prefix; URMA_INCLUDE_DIR also accepts
+        # the tested P2P SDK's core/include source directory.
+        umdk_home = os.getenv("UMDK_HOME")
+        if umdk_home:
+            include_dirs.append(Path(umdk_home) / "include")
+            library_dirs.extend([Path(umdk_home) / "lib64", Path(umdk_home) / "lib"])
+        if os.getenv("URMA_INCLUDE_DIR"):
+            include_dirs.append(Path(os.environ["URMA_INCLUDE_DIR"]))
+        if os.getenv("URMA_LIBRARY_DIR"):
+            library_dirs.append(Path(os.environ["URMA_LIBRARY_DIR"]))
 
     if torch.version.cuda:
         # Add CUDA library directory to library_dirs
@@ -461,6 +473,7 @@ if __name__ == "__main__":
         print(f" > GH200 Support: {'Yes' if has_gh200 else 'No'}")
         print(f" > DMA-BUF Support: {'Yes' if use_dmabuf else 'No'}")
         print(f" > libfabric CXI Support: {'Yes' if use_libfabric_cxi else 'No'}")
+        print(f" > URMA Support: {'Yes' if use_urma else 'No'}")
     print(f" > Device Arch: {device_arch}")
     print(f" > Sources: {len(sources)} files")
     print(f" > Headers (tracked): {len(header_files)} files")

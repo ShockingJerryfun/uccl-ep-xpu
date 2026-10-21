@@ -38,6 +38,23 @@ else
   CXI_LDFLAGS :=
 endif
 
+# NVIDIA P2P support requires the tested UMDK SDK (is_gpu_seg ABI).
+USE_URMA ?= 0
+ifeq ($(USE_URMA),1)
+  URMA_CFLAGS := -DUSE_URMA
+  URMA_LDFLAGS := -lurma
+  ifdef UMDK_HOME
+    URMA_CFLAGS += -I$(UMDK_HOME)/include
+    URMA_LDFLAGS += -L$(UMDK_HOME)/lib64 -L$(UMDK_HOME)/lib
+  endif
+  ifdef URMA_INCLUDE_DIR
+    URMA_CFLAGS += -I$(URMA_INCLUDE_DIR)
+  endif
+  ifdef URMA_LIBRARY_DIR
+    URMA_LDFLAGS += -L$(URMA_LIBRARY_DIR)
+  endif
+endif
+
 ARCH := $(shell uname -m)
 GPU_NAME ?= $(shell nvidia-smi --query-gpu=name --format=csv,noheader | head -n1)
 CPU_IS_ARM64 := 0
@@ -120,12 +137,12 @@ ifdef MAX_NUM_GPUS
 endif
 
 
-CXXFLAGS  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(NORMAL_CFLAGS)
-NVCCFLAGS += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(NORMAL_CFLAGS)
-LDFLAGS   += $(EFA_LDFLAGS) $(CXI_LDFLAGS)
-INCLUDES  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(NORMAL_CFLAGS)
+CXXFLAGS  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(NORMAL_CFLAGS)
+NVCCFLAGS += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(NORMAL_CFLAGS)
+LDFLAGS   += $(EFA_LDFLAGS) $(CXI_LDFLAGS) $(URMA_LDFLAGS)
+INCLUDES  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(NORMAL_CFLAGS)
 
-SRC_CPP := src/proxy.cpp src/rdma.cpp src/common.cpp src/uccl_proxy.cpp src/uccl_bench.cpp src/fifo.cpp src/cxi_transport.cpp
+SRC_CPP := src/proxy.cpp src/rdma.cpp src/common.cpp src/uccl_proxy.cpp src/uccl_bench.cpp src/fifo.cpp src/cxi_transport.cpp src/urma_transport.cpp
 SRC_CU  := src/bench_kernel.cu src/internode_ll.cu src/internode.cu src/layout.cu src/intranode.cu src/ep_runtime.cu
 # Non-binding .cc translation units linked into the shared library.
 SRC_CC_LIB := src/adaptive_sleeper.cc

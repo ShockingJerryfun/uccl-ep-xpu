@@ -88,6 +88,8 @@ class UcclProxy {
   void start(Mode m);
 
   std::unique_ptr<Proxy> proxy_;
+  bool uses_urma_ = false;
+  std::shared_ptr<void> urma_atomic_allocation_;
   std::thread thread_;
   Mode mode_;
   std::atomic<bool> running_;

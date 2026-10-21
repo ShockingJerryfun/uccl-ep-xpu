@@ -1,9 +1,11 @@
 #include "uccl_proxy.hpp"
+#include "ep_backend.hpp"
 #include "common.hpp"
 #include "proxy_ctx.hpp"
 #include "rdma.hpp"
 #include "ring_buffer.cuh"
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <exception>
 #include <iostream>
@@ -64,38 +66,51 @@ UcclProxy::UcclProxy(int thread_idx, uintptr_t gpu_buffer_addr,
   local_rank_ = local_rank;
   node_idx_ = node_idx;
 
+  uses_urma_ = ep_uses_urma();
   if (thread_idx == 0) {
+    if (uses_urma_) {
+      CUDA_CHECK(cudaSetDevice(device_index_));
+      CUDA_CHECK(cudaHostAlloc(&atomic_buffer_ptr_, kAtomicBufferSize,
+                               cudaHostAllocMapped));
+      atomic_buffer_is_host_allocated_ = true;
+      urma_atomic_allocation_ = UrmaTransport::acquire_buffer_ownership(
+          atomic_buffer_ptr_, true, device_index_);
+    } else {
 #ifdef USE_LIBFABRIC_CXI
-    cudaMalloc(&atomic_buffer_ptr_, kAtomicBufferSize);
-    atomic_buffer_is_host_allocated_ = false;
-#elif defined(USE_GRACE_HOPPER)
-    cudaMallocManaged(&atomic_buffer_ptr_, kAtomicBufferSize);
-    atomic_buffer_is_host_allocated_ =
-        false;  // Uses unified memory when we are in Grace hopper (so Alps
-                // clariden will use this)
-#elif defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-    hipExtMallocWithFlags(&atomic_buffer_ptr_, kAtomicBufferSize,
-                          hipDeviceMallocUncached);
-    atomic_buffer_is_host_allocated_ = false;
-#elif defined(EFA)
-    // EFA: atomic buffer is always pinned host memory (cudaHostAlloc).
-    cudaHostAlloc(&atomic_buffer_ptr_, kAtomicBufferSize,
-                  cudaHostAllocMapped | cudaHostAllocWriteCombined);
-    atomic_buffer_is_host_allocated_ = true;
-#else
-    // Dynamically detect: on some nodes (e.g. GH10) ibv_reg_mr fails for
-    // cudaMalloc; use pinned host memory then. Override with
-    // UCCL_ATOMICS_USE_HOST_MEMORY=1 to force host memory.
-    if (can_register_gpu_memory_for_atomics(device_index_)) {
       cudaMalloc(&atomic_buffer_ptr_, kAtomicBufferSize);
       atomic_buffer_is_host_allocated_ = false;
-    } else {
+#elif defined(USE_GRACE_HOPPER)
+      cudaMallocManaged(&atomic_buffer_ptr_, kAtomicBufferSize);
+      atomic_buffer_is_host_allocated_ =
+          false;  // Uses unified memory when we are in Grace hopper (so Alps
+                  // clariden will use this)
+#elif defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+      hipExtMallocWithFlags(&atomic_buffer_ptr_, kAtomicBufferSize,
+                            hipDeviceMallocUncached);
+      atomic_buffer_is_host_allocated_ = false;
+#elif defined(EFA)
+      // EFA: atomic buffer is always pinned host memory (cudaHostAlloc).
       cudaHostAlloc(&atomic_buffer_ptr_, kAtomicBufferSize,
-                    cudaHostAllocMapped);
+                    cudaHostAllocMapped | cudaHostAllocWriteCombined);
       atomic_buffer_is_host_allocated_ = true;
-    }
+#else
+      // Dynamically detect: on some nodes (e.g. GH10) ibv_reg_mr fails for
+      // cudaMalloc; use pinned host memory then. Override with
+      // UCCL_ATOMICS_USE_HOST_MEMORY=1 to force host memory.
+      if (can_register_gpu_memory_for_atomics(device_index_)) {
+        cudaMalloc(&atomic_buffer_ptr_, kAtomicBufferSize);
+        atomic_buffer_is_host_allocated_ = false;
+      } else {
+        cudaHostAlloc(&atomic_buffer_ptr_, kAtomicBufferSize,
+                      cudaHostAllocMapped);
+        atomic_buffer_is_host_allocated_ = true;
+      }
 #endif
-    cudaMemset(atomic_buffer_ptr_, 0, kAtomicBufferSize);
+    }
+    if (uses_urma_)
+      std::memset(atomic_buffer_ptr_, 0, kAtomicBufferSize);
+    else
+      cudaMemset(atomic_buffer_ptr_, 0, kAtomicBufferSize);
     proxy_->set_atomic_buffer_ptr(atomic_buffer_ptr_);
   }
 }
@@ -107,16 +122,24 @@ UcclProxy::~UcclProxy() {
   }
 
   if (thread_idx_ == 0 && atomic_buffer_ptr_) {
-#if defined(USE_LIBFABRIC_CXI) || defined(USE_GRACE_HOPPER)
-    cudaFree(atomic_buffer_ptr_);
-#elif defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-    hipFree(atomic_buffer_ptr_);
-#else
-    if (atomic_buffer_is_host_allocated_)
+    // Allocation records ownership; do not re-read an environment variable
+    // that may have changed since construction.
+    if (uses_urma_) {
+      urma_atomic_allocation_.reset();
+    } else if (atomic_buffer_is_host_allocated_) {
       cudaFreeHost(atomic_buffer_ptr_);
-    else
+    } else {
+#if defined(USE_LIBFABRIC_CXI) || defined(USE_GRACE_HOPPER)
       cudaFree(atomic_buffer_ptr_);
+#elif defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+      hipFree(atomic_buffer_ptr_);
+#else
+      if (atomic_buffer_is_host_allocated_)
+        cudaFreeHost(atomic_buffer_ptr_);
+      else
+        cudaFree(atomic_buffer_ptr_);
 #endif
+    }
     atomic_buffer_ptr_ = nullptr;
   }
 
