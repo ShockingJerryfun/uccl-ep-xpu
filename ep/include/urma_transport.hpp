@@ -38,8 +38,8 @@ class UrmaTransport final : public EpTransport {
   UrmaTransport(UrmaTransport const&) = delete;
   UrmaTransport& operator=(UrmaTransport const&) = delete;
   void init(ProxyCtx& ctx) override;
-  void register_main_buffer(void* ptr, size_t len, int cuda_device) override;
-  void register_atomic_buffer(void* ptr, size_t len, int cuda_device) override;
+  void register_main_buffer(void* ptr, size_t len, int gpu_device) override;
+  void register_atomic_buffer(void* ptr, size_t len, int gpu_device) override;
   LocalConnInfo local_info() const override;
   void connect_peer(int peer, RemoteConnInfo const& remote) override;
   void post_write(int dst_rank, uint64_t wr_id, uint64_t local_offset,
@@ -57,11 +57,11 @@ class UrmaTransport final : public EpTransport {
   uint64_t load_barrier_word(size_t slot) const;
   int poll(TransportCompletion* out, int max) override;
   void destroy() override;
-  // Share CUDA-allocation ownership with every registration of this pointer.
+  // Share GPU-allocation ownership with every registration of this pointer.
   // The returned lease keeps the allocation alive; the final lease or
   // registration releases it after unregistering the segment.
   static std::shared_ptr<void> acquire_buffer_ownership(void* ptr, bool host,
-                                                        int cuda_device);
+                                                        int gpu_device);
 
  private:
   [[noreturn]] static void unavailable();

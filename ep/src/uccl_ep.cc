@@ -9,6 +9,7 @@
 #include "ep_proxy_registry.hpp"
 #include "ep_runtime.cuh"
 #include "ep_util.hpp"
+#include "gpu_p2p_runtime.hpp"
 #include "internode.cuh"
 #include "internode_ll.cuh"
 #include "intranode.cuh"
@@ -247,21 +248,14 @@ void rdma_buffer_capsule_destructor(PyObject* capsule) {
 
 nb::object make_rdma_buffer_dlpack_capsule(void* ptr, std::size_t bytes,
                                            int device_index,
-                                           bool is_host_allocated) {
+                                           bool is_host_allocated,
+                                           std::shared_ptr<void> urma_owner) {
   auto* ctx = new RdmaBufferDlpack();
   ctx->ptr = ptr;
   ctx->bytes = bytes;
   ctx->device_index = device_index;
   ctx->is_host_allocated = is_host_allocated;
-  try {
-    if (ep_uses_urma()) {
-      ctx->urma_allocation = UrmaTransport::acquire_buffer_ownership(
-          ptr, is_host_allocated, device_index);
-    }
-  } catch (...) {
-    delete ctx;
-    throw;
-  }
+  ctx->urma_allocation = std::move(urma_owner);
   ctx->shape[0] = static_cast<int64_t>(bytes);
   ctx->managed.manager_ctx = ctx;
   ctx->managed.deleter = rdma_buffer_dlpack_deleter;
@@ -284,7 +278,9 @@ nb::object make_rdma_buffer_dlpack_capsule(void* ptr, std::size_t bytes,
   PyObject* capsule =
       PyCapsule_New(&ctx->managed, "dltensor", rdma_buffer_capsule_destructor);
   if (!capsule) {
-    rdma_buffer_dlpack_deleter(&ctx->managed);
+    // The caller still holds the allocation lease (if any) and performs the
+    // one matching release on this error path.
+    delete ctx;
     throw nb::python_error();
   }
   return nb::steal<nb::object>(capsule);
@@ -298,16 +294,30 @@ std::tuple<nb::object, bool> allocate_rdma_buffer_dlpack(
   void* ptr = nullptr;
 
   bool const use_urma = ep_uses_urma();
-  CUDA_CHECK(cudaSetDevice(device_index));
+  if (use_urma)
+    gpu_p2p::set_device(device_index);
+  else
+    CUDA_CHECK(cudaSetDevice(device_index));
   std::size_t backing_bytes = alloc_bytes;
   if (use_urma) {
-    constexpr std::size_t alignment = 64 * 1024;
+    std::size_t const alignment = gpu_p2p::registration_alignment();
     if (alloc_bytes > SIZE_MAX - (alignment - 1))
       throw std::overflow_error("URMA allocation size overflow");
     backing_bytes = (alloc_bytes + alignment - 1) & ~(alignment - 1);
   }
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+  std::shared_ptr<void> urma_owner;
+  try {
+#if defined(USE_URMA_METAX)
+  if (use_urma) {
+    ptr = gpu_p2p::allocate_device(backing_bytes, device_index);
+    gpu_p2p::zero_memory(ptr, alloc_bytes, gpu_p2p::MemoryKind::Device,
+                         device_index);
+  } else {
+    CUDA_CHECK(cudaMalloc(&ptr, backing_bytes));
+    CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
+  }
+#elif defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   CUDA_CHECK(hipExtMallocWithFlags(&ptr, alloc_bytes, hipDeviceMallocUncached));
   CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
 #elif defined(EFA) || defined(USE_DMABUF)
@@ -327,11 +337,24 @@ std::tuple<nb::object, bool> allocate_rdma_buffer_dlpack(
   }
 #endif
 
-  try {
+    if (use_urma) {
+      urma_owner = UrmaTransport::acquire_buffer_ownership(
+          ptr, is_host_allocated, device_index);
+    }
     return {make_rdma_buffer_dlpack_capsule(ptr, alloc_bytes, device_index,
-                                            is_host_allocated),
+                                            is_host_allocated, urma_owner),
             is_host_allocated};
   } catch (...) {
+    if (urma_owner) {
+      urma_owner.reset();
+      throw;
+    }
+#ifdef USE_URMA_METAX
+    if (use_urma) {
+      gpu_p2p::release_memory(ptr, gpu_p2p::MemoryKind::Device, device_index);
+      throw;
+    }
+#endif
     free_rdma_raw_buffer(ptr, device_index, is_host_allocated);
     throw;
   }
@@ -1561,8 +1584,8 @@ class Buffer {
                    "atomic IPC handle");
     if (ep_uses_urma()) {
       throw std::runtime_error(
-          "URMA uses mapped host memory for atomic control state; CUDA IPC "
-          "handles are unavailable for this buffer");
+          "URMA atomic control state is transport-owned; CUDA IPC handles "
+          "are unavailable for this buffer");
     }
     cudaIpcMemHandle_t h{};
     CUDA_CHECK(cudaIpcGetMemHandle(&h, atomic_buffer_ptr));
@@ -1587,6 +1610,16 @@ class Buffer {
   }
 
   void reset_rdma_buffer() {
+#ifdef USE_URMA_METAX
+    if (ep_uses_urma()) {
+      gpu_p2p::zero_memory(rdma_buffer_ptr, num_rdma_bytes,
+                           gpu_p2p::MemoryKind::Device, device_index);
+      if (atomic_buffer_ptr != nullptr)
+        gpu_p2p::zero_memory(atomic_buffer_ptr, kAtomicBufferSize,
+                             gpu_p2p::MemoryKind::Device, device_index);
+      return;
+    }
+#endif
     CUDA_CHECK(
         cudaMemsetAsync(rdma_buffer_ptr, 0, num_rdma_bytes, comm_stream));
     CUDA_CHECK(cudaStreamSynchronize(comm_stream));

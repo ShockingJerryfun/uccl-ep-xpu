@@ -1,5 +1,11 @@
-CUDA_PATH ?= /usr/local/cuda
-override CXX := /usr/bin/g++
+USE_URMA_METAX ?= 0
+MACA_PATH ?= /opt/maca
+ifeq ($(USE_URMA_METAX),1)
+  CUDA_PATH ?= $(MACA_PATH)/tools/cu-bridge
+else
+  CUDA_PATH ?= /usr/local/cuda
+endif
+CXX       := /usr/bin/g++
 NVCC      := $(CUDA_PATH)/bin/nvcc
 
 EFA_HOME?=/opt/amazon/efa
@@ -38,11 +44,16 @@ else
   CXI_LDFLAGS :=
 endif
 
-# NVIDIA P2P support requires the tested UMDK SDK (is_gpu_seg ABI).
+# URMA GPU P2P uses the tested UMDK is_gpu_seg ABI. Set
+# USE_URMA_METAX=1 for the MetaX MACA runtime and 4 KiB registration pages.
 USE_URMA ?= 0
 ifeq ($(USE_URMA),1)
   URMA_CFLAGS := -DUSE_URMA
   URMA_LDFLAGS := -lurma
+  ifeq ($(USE_URMA_METAX),1)
+    URMA_CFLAGS += -DUSE_URMA_METAX
+    URMA_LDFLAGS += -ldl
+  endif
   ifdef UMDK_HOME
     URMA_CFLAGS += -I$(UMDK_HOME)/include
     URMA_LDFLAGS += -L$(UMDK_HOME)/lib64 -L$(UMDK_HOME)/lib
@@ -53,6 +64,8 @@ ifeq ($(USE_URMA),1)
   ifdef URMA_LIBRARY_DIR
     URMA_LDFLAGS += -L$(URMA_LIBRARY_DIR)
   endif
+else ifeq ($(USE_URMA_METAX),1)
+  $(error USE_URMA_METAX=1 requires USE_URMA=1)
 endif
 
 ARCH := $(shell uname -m)
@@ -104,8 +117,13 @@ TORCH_INCS := -I$(TORCH_INCLUDE) -I$(TORCH_INCLUDE_API)
 PYTHON_SITE_PACKAGES := $(shell $(PYTHON) -c "import site; print(site.getsitepackages()[0])")
 INSTALL_DIR          := $(PYTHON_SITE_PACKAGES)/uccl
 
-# GPU arch (auto-detected, override with: make SM=90)
+# GPU arch (auto-detected, override with: make SM=90). MACA cu-bridge accepts
+# CUDA-compatible SM flags; C500 exposes compute capability 9.0.
+ifeq ($(USE_URMA_METAX),1)
+DETECTED_SM := 90
+else
 DETECTED_SM := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n1 | tr -d '.')
+endif
 SM ?= $(DETECTED_SM)
 
 CXXFLAGS  := -O3 -std=c++17 -Wall -pthread -fPIC -fvisibility=hidden -Wno-interference-size -Wno-unused-function -D_GLIBCXX_USE_CXX11_ABI=$(TORCH_ABI) -DNB_DOMAIN=uccl_ep
@@ -142,7 +160,7 @@ NVCCFLAGS += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CF
 LDFLAGS   += $(EFA_LDFLAGS) $(CXI_LDFLAGS) $(URMA_LDFLAGS)
 INCLUDES  += $(EFA_CFLAGS) $(GH_CFLAGS) $(DMABUF_CFLAGS) $(CXI_CFLAGS) $(URMA_CFLAGS) $(NORMAL_CFLAGS)
 
-SRC_CPP := src/proxy.cpp src/rdma.cpp src/common.cpp src/uccl_proxy.cpp src/uccl_bench.cpp src/fifo.cpp src/cxi_transport.cpp src/urma_transport.cpp
+SRC_CPP := src/proxy.cpp src/rdma.cpp src/common.cpp src/uccl_proxy.cpp src/uccl_bench.cpp src/fifo.cpp src/cxi_transport.cpp src/gpu_p2p_runtime.cpp src/urma_transport.cpp
 SRC_CU  := src/bench_kernel.cu src/internode_ll.cu src/internode.cu src/layout.cu src/intranode.cu src/ep_runtime.cu
 # Non-binding .cc translation units linked into the shared library.
 SRC_CC_LIB := src/adaptive_sleeper.cc

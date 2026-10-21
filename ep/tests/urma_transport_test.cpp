@@ -59,6 +59,26 @@ cudaError_t cudaPointerGetAttributes(cudaPointerAttributes* a, void const* p) {
   return 1;
 }
 int gpu_frees = 0, host_frees = 0;
+cudaError_t cudaMalloc(void** ptr, std::size_t) {
+  static std::uint64_t storage[16];
+  *ptr = storage;
+  gpu_ptrs.insert(*ptr);
+  return 0;
+}
+cudaError_t cudaHostAlloc(void** ptr, std::size_t, unsigned int) {
+  static std::uint64_t storage[16];
+  *ptr = storage;
+  host_ptrs.insert(*ptr);
+  return 0;
+}
+cudaError_t cudaMemset(void* ptr, int value, std::size_t bytes) {
+  std::memset(ptr, value, bytes);
+  return 0;
+}
+cudaError_t cudaMemcpy(void* dst, void const* src, std::size_t bytes, int) {
+  std::memcpy(dst, src, bytes);
+  return 0;
+}
 cudaError_t cudaFree(void*) {
   ++gpu_frees;
   assert(gpu_regs == 0);
@@ -138,7 +158,9 @@ urma_target_seg_t* urma_register_seg(urma_context_t* c, urma_seg_cfg_t* cfg) {
   if (!cfg->token_id || !cfg->flag.bs.token_id_valid) return nullptr;
   bool gpu = gpu_ptrs.count(reinterpret_cast<void*>(cfg->va));
   if (gpu != bool(cfg->is_gpu_seg) || cfg->flag.bs.non_pin) return nullptr;
+#ifndef USE_URMA_METAX
   if (gpu && !sync_ptrs.count(reinterpret_cast<void*>(cfg->va))) return nullptr;
+#endif
   if (gpu) ++gpu_regs;
   auto* s = create<urma_target_seg_t>();
   s->urma_ctx = c;
@@ -223,17 +245,31 @@ int main() {
   assert(init_count == 0 && resources == 0);
   alignas(65536) uint64_t a[32]{}, b[32]{};
   alignas(4096) uint64_t ac[8]{}, bc[8]{};
+#ifdef USE_URMA_METAX
+  gpu_ptrs = {a, b, ac, bc};
+  host_ptrs.clear();
+#else
   gpu_ptrs = {a, b};
   host_ptrs = {ac, bc};
+#endif
   {
     UrmaTransport left, right;
     left.init(ctx);
     right.init(ctx);
+#ifndef USE_URMA_METAX
     rejects([&] { left.register_main_buffer(ac, sizeof(ac), 2); });
     rejects([&] { left.register_main_buffer(a, sizeof(a), 0); });
+#endif
     left.register_main_buffer(a, sizeof(a), 2);
     right.register_main_buffer(b, sizeof(b), 2);
+#ifdef USE_URMA_METAX
+    assert(sync_ptrs.empty());
+#endif
+#ifdef USE_URMA_METAX
+    assert(gpu_regs == 2);
+#else
     assert(selected_device == 2 && gpu_regs == 2);
+#endif
     {
       UrmaTransport duplicate;
       duplicate.init(ctx);
@@ -295,7 +331,14 @@ int main() {
   // An owning proxy may stop before another proxy sharing its allocation.
   {
     auto main_owner = UrmaTransport::acquire_buffer_ownership(a, false, 2);
-    auto control_owner = UrmaTransport::acquire_buffer_ownership(ac, true, 2);
+    auto control_owner = UrmaTransport::acquire_buffer_ownership(
+        ac,
+#ifdef USE_URMA_METAX
+        false,
+#else
+        true,
+#endif
+        2);
     UrmaTransport first, last;
     first.init(ctx);
     last.init(ctx);
@@ -306,9 +349,17 @@ int main() {
     first.destroy();
     main_owner.reset();
     control_owner.reset();
+#ifdef USE_URMA_METAX
+    assert(gpu_frees == 0 && host_frees == 0 && gpu_regs == 2);
+#else
     assert(gpu_frees == 0 && host_frees == 0 && gpu_regs == 1);
+#endif
     last.destroy();
+#ifdef USE_URMA_METAX
+    assert(gpu_frees == 0 && host_frees == 0 && gpu_regs == 0);
+#else
     assert(gpu_frees == 1 && host_frees == 1 && gpu_regs == 0);
+#endif
   }
   // DLPack owns the same allocation; proxy teardown must not free it twice.
   {
@@ -319,9 +370,13 @@ int main() {
     t.register_main_buffer(a, sizeof(a), 2);
     t.destroy();
     proxy_owner.reset();
+#ifndef USE_URMA_METAX
     assert(gpu_frees == 1);
+#endif
     tensor_owner.reset();
+#ifndef USE_URMA_METAX
     assert(gpu_frees == 2);
+#endif
   }
   fail_register = true;
   {

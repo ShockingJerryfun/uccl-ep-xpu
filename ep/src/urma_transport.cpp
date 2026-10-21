@@ -1,5 +1,6 @@
 #include "urma_transport.hpp"
 #include "common.hpp"
+#include "gpu_p2p_runtime.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -19,7 +20,7 @@ UrmaTransport::~UrmaTransport() {
   try {
     destroy();
   } catch (std::exception const& e) {
-    // Continuing would let CUDA buffers or op contexts be freed while DMA
+    // Continuing would let GPU buffers or op contexts be freed while DMA
     // may still reference them. Teardown failure is deliberately fail-stop.
     std::fprintf(stderr, "URMA teardown failed: %s\n", e.what());
     std::terminate();
@@ -53,8 +54,6 @@ std::shared_ptr<void> UrmaTransport::acquire_buffer_ownership(void*, bool,
   unavailable();
 }
 #else  // USE_URMA
-#include <cuda.h>
-#include <cuda_runtime_api.h>
 // Registration objects are only created/released while g_resource_mutex is
 // held. Jetty/JFC remain private to each transport; identical main/control
 // ranges share a pin/token/mapping on the same device context.
@@ -62,22 +61,24 @@ struct UrmaAllocation {
   void* ptr = nullptr;
   bool owned = false;
   bool host = false;
-  int cuda_device = -1;
+  int gpu_device = -1;
   ~UrmaAllocation() {
     if (!owned) return;
-    if (!host && cudaSetDevice(cuda_device) != cudaSuccess) {
-      std::fprintf(stderr,
-                   "URMA failed to select CUDA device before release\n");
-      std::terminate();
-    }
-    if ((host ? cudaFreeHost(ptr) : cudaFree(ptr)) != cudaSuccess) {
-      std::fprintf(stderr, "URMA failed to release CUDA allocation\n");
+    try {
+      uccl::gpu_p2p::release_memory(
+          ptr,
+          host ? uccl::gpu_p2p::MemoryKind::HostMapped
+               : uccl::gpu_p2p::MemoryKind::Device,
+          gpu_device);
+    } catch (std::exception const& e) {
+      std::fprintf(stderr, "URMA failed to release %s allocation: %s\n",
+                   uccl::gpu_p2p::vendor_name(), e.what());
       std::terminate();
     }
   }
 };
 struct UrmaRegistration {
-  // Destructor body unregisters before this member releases CUDA storage.
+  // Destructor body unregisters before this member releases GPU storage.
   std::shared_ptr<UrmaAllocation> allocation;
   std::shared_ptr<urma_context_t> context;
   urma_target_seg_t* seg = nullptr;
@@ -118,14 +119,9 @@ urma_transport_mode_t urma_trans_mode_from_env() {
   char const* tm = std::getenv("UCCL_URMA_TM");
   if (tm && std::string(tm) != "rc") {
     throw std::runtime_error(
-        "NVIDIA P2P URMA backend requires UCCL_URMA_TM=rc");
+        "GPU P2P URMA backend requires UCCL_URMA_TM=rc");
   }
   return URMA_TM_RC;
-}
-void check_cuda(cudaError_t status, char const* op) {
-  if (status != cudaSuccess)
-    throw std::runtime_error(std::string(op) + ": " +
-                             cudaGetErrorString(status));
 }
 void check_range(uint64_t offset, uint64_t bytes, uint64_t length) {
   if (offset > length || bytes > length - offset)
@@ -144,7 +140,7 @@ UrmaTransport::~UrmaTransport() {
   try {
     destroy();
   } catch (std::exception const& e) {
-    // Continuing would let CUDA buffers or op contexts be freed while DMA
+    // Continuing would let GPU buffers or op contexts be freed while DMA
     // may still reference them. Teardown failure is deliberately fail-stop.
     std::fprintf(stderr, "URMA teardown failed: %s\n", e.what());
     std::terminate();
@@ -303,8 +299,8 @@ void UrmaTransport::init(ProxyCtx& ctx) {
 }
 std::shared_ptr<void> UrmaTransport::acquire_buffer_ownership(void* ptr,
                                                               bool host,
-                                                              int cuda_device) {
-  if (!ptr || (!host && cuda_device < 0))
+                                                              int gpu_device) {
+  if (!ptr || (!host && gpu_device < 0))
     throw std::invalid_argument("invalid URMA allocation ownership");
   std::lock_guard<std::mutex> lock(g_resource_mutex);
   auto allocation = g_allocations[ptr].lock();
@@ -314,11 +310,11 @@ std::shared_ptr<void> UrmaTransport::acquire_buffer_ownership(void* ptr,
     g_allocations[ptr] = allocation;
   }
   if (allocation->owned &&
-      (allocation->host != host || allocation->cuda_device != cuda_device))
+      (allocation->host != host || allocation->gpu_device != gpu_device))
     throw std::logic_error("conflicting URMA allocation ownership");
   allocation->owned = true;
   allocation->host = host;
-  allocation->cuda_device = cuda_device;
+  allocation->gpu_device = gpu_device;
   return allocation;
 }
 
@@ -343,7 +339,8 @@ urma_target_seg_t* UrmaTransport::register_segment(void* ptr, size_t len,
     auto const& k = it->first;
     if (gpu && std::get<3>(k) && std::get<0>(k) == urma_ctx_) {
       uint64_t va = reinterpret_cast<uint64_t>(ptr), other = std::get<1>(k);
-      constexpr uint64_t page_mask = ~uint64_t(65535);
+      uint64_t const alignment = uccl::gpu_p2p::registration_alignment();
+      uint64_t const page_mask = ~(alignment - 1);
       uint64_t end_page = (va + len - 1) & page_mask;
       uint64_t other_end_page = (other + std::get<2>(k) - 1) & page_mask;
       if ((va & page_mask) <= other_end_page && (other & page_mask) <= end_page)
@@ -379,8 +376,9 @@ urma_target_seg_t* UrmaTransport::register_segment(void* ptr, size_t len,
   if (!seg) {
     check_urma(urma_free_token_id(token), "urma_free_token_id");
     throw std::runtime_error(
-        gpu ? "URMA NVIDIA P2P segment registration failed (no host fallback)"
-            : "URMA host segment registration failed");
+        gpu ? std::string("URMA ") + uccl::gpu_p2p::vendor_name() +
+                  " P2P segment registration failed (no host fallback)"
+            : std::string("URMA host segment registration failed"));
   }
   owner->seg = seg;
   owner->token = token;
@@ -391,20 +389,7 @@ urma_target_seg_t* UrmaTransport::register_segment(void* ptr, size_t len,
 void UrmaTransport::register_main_buffer(void* ptr, size_t len, int device) {
   if (!urma_ctx_ || main_tseg_)
     throw std::logic_error("invalid main registration state");
-  check_cuda(cudaSetDevice(device), "cudaSetDevice");
-  cudaPointerAttributes attr{};
-  check_cuda(cudaPointerGetAttributes(&attr, ptr),
-             "cudaPointerGetAttributes(main)");
-  if (attr.type != cudaMemoryTypeDevice || attr.device != device)
-    throw std::invalid_argument(
-        "URMA main buffer must be NVIDIA device memory on the selected CUDA "
-        "ordinal");
-  // Same prerequisite as the working NVIDIA P2P perftest; keep synchronous
-  // CUDA memory operations ordered before handing the VA to the NIC driver.
-  unsigned int sync_memops = 1;
-  if (cuPointerSetAttribute(&sync_memops, CU_POINTER_ATTRIBUTE_SYNC_MEMOPS,
-                            reinterpret_cast<CUdeviceptr>(ptr)) != CUDA_SUCCESS)
-    throw std::runtime_error("cuPointerSetAttribute(SYNC_MEMOPS) failed");
+  uccl::gpu_p2p::prepare_main_buffer(ptr, len, device);
   main_tseg_ = register_segment(ptr, len, true, false);
   main_buffer_ = ptr;
   main_buffer_len_ = len;
@@ -414,15 +399,9 @@ void UrmaTransport::register_main_buffer(void* ptr, size_t len, int device) {
 void UrmaTransport::register_atomic_buffer(void* ptr, size_t len, int device) {
   if (!urma_ctx_ || atomic_tseg_)
     throw std::logic_error("invalid control registration state");
-  check_cuda(cudaSetDevice(device), "cudaSetDevice");
-  cudaPointerAttributes attr{};
-  check_cuda(cudaPointerGetAttributes(&attr, ptr),
-             "cudaPointerGetAttributes(control)");
-  if (attr.type != cudaMemoryTypeHost || attr.devicePointer != ptr)
-    throw std::invalid_argument(
-        "URMA control buffer requires CUDA mapped host memory with identical "
-        "UVA");
-  atomic_tseg_ = register_segment(ptr, len, false, true);
+  uccl::gpu_p2p::prepare_atomic_buffer(ptr, len, device);
+  atomic_tseg_ = register_segment(
+      ptr, len, uccl::gpu_p2p::atomic_buffer_is_gpu_memory(), true);
   atomic_buffer_ = ptr;
   atomic_buffer_len_ = len;
   local_info_.atomic_buffer_addr = reinterpret_cast<uintptr_t>(ptr);

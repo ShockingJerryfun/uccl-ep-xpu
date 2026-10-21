@@ -1,6 +1,7 @@
 #include "uccl_proxy.hpp"
 #include "ep_backend.hpp"
 #include "common.hpp"
+#include "gpu_p2p_runtime.hpp"
 #include "proxy_ctx.hpp"
 #include "rdma.hpp"
 #include "ring_buffer.cuh"
@@ -69,12 +70,12 @@ UcclProxy::UcclProxy(int thread_idx, uintptr_t gpu_buffer_addr,
   uses_urma_ = ep_uses_urma();
   if (thread_idx == 0) {
     if (uses_urma_) {
-      CUDA_CHECK(cudaSetDevice(device_index_));
-      CUDA_CHECK(cudaHostAlloc(&atomic_buffer_ptr_, kAtomicBufferSize,
-                               cudaHostAllocMapped));
-      atomic_buffer_is_host_allocated_ = true;
+      atomic_buffer_ptr_ = uccl::gpu_p2p::allocate_atomic_buffer(
+          kAtomicBufferSize, device_index_);
+      atomic_buffer_is_host_allocated_ =
+          !uccl::gpu_p2p::atomic_buffer_is_gpu_memory();
       urma_atomic_allocation_ = UrmaTransport::acquire_buffer_ownership(
-          atomic_buffer_ptr_, true, device_index_);
+          atomic_buffer_ptr_, atomic_buffer_is_host_allocated_, device_index_);
     } else {
 #ifdef USE_LIBFABRIC_CXI
       cudaMalloc(&atomic_buffer_ptr_, kAtomicBufferSize);
@@ -107,10 +108,16 @@ UcclProxy::UcclProxy(int thread_idx, uintptr_t gpu_buffer_addr,
       }
 #endif
     }
-    if (uses_urma_)
-      std::memset(atomic_buffer_ptr_, 0, kAtomicBufferSize);
-    else
+    if (uses_urma_) {
+      uccl::gpu_p2p::zero_memory(
+          atomic_buffer_ptr_, kAtomicBufferSize,
+          atomic_buffer_is_host_allocated_
+              ? uccl::gpu_p2p::MemoryKind::HostMapped
+              : uccl::gpu_p2p::MemoryKind::Device,
+          device_index_);
+    } else {
       cudaMemset(atomic_buffer_ptr_, 0, kAtomicBufferSize);
+    }
     proxy_->set_atomic_buffer_ptr(atomic_buffer_ptr_);
   }
 }
