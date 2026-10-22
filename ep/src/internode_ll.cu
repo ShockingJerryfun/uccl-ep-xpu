@@ -21,7 +21,11 @@ constexpr int kNumMaxWarpGroups = 32;
 #endif
 
 template <int kNumThreads, int kNumRanks>
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+__launch_bounds__(kNumThreads) __global__
+#else
 __launch_bounds__(kNumThreads, 1) __global__
+#endif
     void clean_low_latency_buffer(int* clean_0, int num_clean_int_0,
                                   int* clean_1, int num_clean_int_1,
                                   int** barrier_signal_ptrs, int rank) {
@@ -60,7 +64,11 @@ void clean_low_latency_buffer(int* clean_0, int num_clean_int_0, int* clean_1,
 }
 
 template <bool kUseFP8, bool kUseUE8M0, int kHidden, bool kUseAggressiveAtomic>
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+__global__ __launch_bounds__(1024) void dispatch(
+#else
 __global__ __launch_bounds__(1024, 1) void dispatch(
+#endif
     void* packed_recv_x, void* packed_recv_x_scales, int* packed_recv_src_info,
     int64_t* packed_recv_layout_range, int* packed_recv_count,
     int* cumulative_local_expert_recv_stats,
@@ -759,7 +767,11 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
 
 template <bool kUseLogFMT, int kHidden, int kNumMaxTopk,
           bool kUseAggressiveAtomic>
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+__global__ __launch_bounds__(1024) void combine(
+#else
 __global__ __launch_bounds__(1024, 1) void combine(
+#endif
     void* combined_x, void* rdma_recv_x, int* rdma_recv_flag, void* rdma_send_x,
     void const* x, int64_t const* topk_idx, float const* topk_weights,
     int const* src_info, int64_t const* layout_range,
