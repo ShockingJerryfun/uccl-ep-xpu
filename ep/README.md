@@ -72,6 +72,15 @@ not the MetaX hardware target. FP8 uses E4M3 with a 448 maximum; LogFmt is exclu
 by the existing non-SM90 assertion. PyTorch ABI, device linking, numeric results,
 IPC and system-scope ordering remain [pending validation](docs/xpu-primitive-mapping.md#pending-validation).
 
+For URMA integration, build with `USE_METAX=1 USE_URMA=1 python setup.py install`
+and set `UCCL_EP_TRANSPORT=urma` when running. Set `UMDK_HOME`, or
+`URMA_INCLUDE_DIR` and `URMA_LIBRARY_DIR`, to the installed GPU P2P SDK. The
+transport requires `urma_seg_cfg_t.is_gpu_seg` and matching GPU-memory support
+in the UDMA driver. Both nodes must use the same build and descriptor ABI.
+EP payload and notification buffers retain the MetaX fine-grained allocation;
+the transport owns their registration and release. Full MetaX/URMA benchmark
+execution remains unvalidated.
+
 Standalone tests can be compiled without PyTorch:
 
 ```bash

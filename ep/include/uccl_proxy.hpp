@@ -88,6 +88,8 @@ class UcclProxy {
   void start(Mode m);
 
   std::unique_ptr<Proxy> proxy_;
+  bool uses_urma_ = false;
+  std::shared_ptr<void> urma_atomic_allocation_;
   std::thread thread_;
   Mode mode_;
   std::atomic<bool> running_;
@@ -100,7 +102,7 @@ class UcclProxy {
   int nic_local_rank_;
   void* atomic_buffer_ptr_ = nullptr;
   bool atomic_buffer_is_host_allocated_ =
-      false;  // true => cudaFreeHost, false => cudaFree
+      false;  // URMA ownership selects the matching NVIDIA/MetaX release API.
   int node_idx_;
   bool is_intranode_;
   std::vector<d2hq::HostD2HHandle> d2h_queues;

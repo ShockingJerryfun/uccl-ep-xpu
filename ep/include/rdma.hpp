@@ -66,8 +66,9 @@ struct RDMAConnectionInfo {
 #endif
 
 #ifdef USE_URMA
-  // URMA connection blobs — serialized urma_rjetty_t / urma_seg_t objects
-  // exchanged verbatim over the existing TCP bootstrap.
+  // P2P SDK native descriptors; no local pointers/handles. Same ABI/build
+  // required at both ends. Version rejects the previous opaque-blob format.
+  uint32_t urma_wire_version = 0;
   static constexpr uint32_t kMaxUrmaBlob = 2048;
   uint32_t urma_rjetty_len = 0;
   uint8_t urma_rjetty[kMaxUrmaBlob] = {};
@@ -403,6 +404,11 @@ bool can_register_gpu_memory_for_rdma(int gpu_idx, size_t bytes);
 // signaling buffer path. If false, use host memory for the atomic buffer.
 bool can_register_gpu_memory_for_atomics(int gpu_idx);
 
+// Register a control buffer according to UCCL_EP_VERBS_REG. Host-mapped
+// buffers always use ibv_reg_mr; device buffers honor strict peermem/dmabuf.
+ibv_mr* register_control_buffer_mr(ibv_pd* pd, void* buffer, size_t bytes,
+                                   int access);
+
 // Returns true if at least one IB verbs device is visible on this host.
 bool has_any_nic();
 
@@ -412,8 +418,8 @@ bool has_any_nic();
 // When resources are shared with other threads, nulls the pointers so the
 // caller skips the actual ibv_dereg / dealloc / close.
 void release_shared_rdma_resources(ProxyCtx& ctx, void* gpu_buf);
-// Register GPU memory using DMA-BUF (no nvidia_peermem needed).
-// Falls back to ibv_reg_mr_iova2 if DMA-BUF is unsupported.
+// Register GPU memory using DMA-BUF. This function never falls back to
+// peer-memory; the caller enforces auto/strict registration policy.
 ibv_mr* reg_mr_gpu_dmabuf(ibv_pd* pd, void* gpu_buf, size_t bytes,
                           uint64_t iova, int access);
 

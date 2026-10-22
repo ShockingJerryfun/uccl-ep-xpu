@@ -8,6 +8,19 @@ import shutil
 import site
 from pathlib import Path
 
+# mcPyTorch exposes CUDA-compatible extension tooling through MACA cu-bridge.
+_legacy_urma_metax = int(os.getenv("USE_URMA_METAX", "0"))
+_use_metax_platform = (
+    int(os.getenv("USE_METAX", "0"))
+    or _legacy_urma_metax
+    or bool(os.getenv("MACA_PATH"))
+)
+if _use_metax_platform:
+    _maca_path = Path(os.getenv("MACA_PATH", "/opt/maca"))
+    _cu_bridge = str(_maca_path / "tools" / "cu-bridge")
+    os.environ.setdefault("CUDA_HOME", _cu_bridge)
+    os.environ.setdefault("CUDA_PATH", _cu_bridge)
+
 import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 from setuptools.command.install import install
@@ -190,36 +203,68 @@ if __name__ == "__main__":
             include_dirs.append(Path(libfabric_home) / "include")
             library_dirs.append(Path(libfabric_home) / "lib")
 
+    use_metax = bool(_use_metax_platform)
     use_urma = int(os.getenv("USE_URMA", "0"))
+    use_urma_metax = int(os.getenv("USE_URMA_METAX", "0"))
+    if use_urma_metax and not use_urma:
+        raise RuntimeError("USE_URMA_METAX=1 requires USE_URMA=1")
+    if use_metax:
+        print("Building for MetaX MACA platform (USE_METAX)")
+        metax_flags = [
+            "-DUSE_METAX",
+            "-D__MC_PLATFORM_MXCC__",
+            "-DDISABLE_SM90_FEATURES",
+            "-DDISABLE_AGGRESSIVE_PTX_INSTRS",
+        ]
+        cxx_flags.extend(metax_flags)
+        nvcc_flags.extend(metax_flags)
+        if sys.platform.startswith("linux"):
+            libraries.append("dl")
     if use_urma:
         print("Building with URMA transport support (USE_URMA)")
         cxx_flags.append("-DUSE_URMA")
         nvcc_flags.append("-DUSE_URMA")
         libraries.append("urma")
+        if not use_metax and not torch.version.cuda:
+            raise RuntimeError("USE_URMA currently requires NVIDIA CUDA")
+        # UMDK_HOME is an installed SDK prefix; URMA_INCLUDE_DIR also accepts
+        # the tested P2P SDK's core/include source directory.
+        umdk_home = os.getenv("UMDK_HOME")
+        if umdk_home:
+            include_dirs.append(Path(umdk_home) / "include")
+            library_dirs.extend([Path(umdk_home) / "lib64", Path(umdk_home) / "lib"])
+        if os.getenv("URMA_INCLUDE_DIR"):
+            include_dirs.append(Path(os.environ["URMA_INCLUDE_DIR"]))
+        if os.getenv("URMA_LIBRARY_DIR"):
+            library_dirs.append(Path(os.environ["URMA_LIBRARY_DIR"]))
 
-    maca_path = os.getenv("MACA_PATH")
-    if maca_path:
+    use_dmabuf = int(os.getenv("USE_DMABUF", "0"))
+    if use_dmabuf:
+        cxx_flags.append("-DUSE_DMABUF")
+        nvcc_flags.append("-DUSE_DMABUF")
+
+    maca_path = str(_maca_path) if use_metax else None
+    if use_metax:
         device_arch = os.environ["CUCC_TARGETS"]
         os.environ["PYTORCH_NVCC"] = str(
             Path(maca_path) / "tools" / "cu-bridge" / "bin" / "cucc"
         )
         os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
-        cxx_flags.extend(["-D__MC_PLATFORM_MXCC__", "-DDISABLE_SM90_FEATURES"])
         nvcc_flags.extend(
             [
-                "-D__MC_PLATFORM_MXCC__",
-                "-DDISABLE_SM90_FEATURES",
                 "-rdc=true",
                 "-fno-strict-aliasing",
             ]
         )
         nvcc_dlink = ["-dlink"]
         include_dirs.append(Path(maca_path) / "include")
+        include_dirs.append(Path(maca_path) / "include" / "mcr")
         library_dirs.append(Path(maca_path) / "lib")
         extra_link_args.extend(
             [f"-Wl,-rpath,{maca_path}/lib", f"-Wl,-rpath-link,{maca_path}/lib"]
         )
     elif torch.version.cuda:
+        libraries.append("cuda")
         # Add CUDA library directory to library_dirs
         cuda_home = os.getenv("CUDA_HOME", "/usr/local/cuda")
         library_dirs.append(str(Path(cuda_home) / "lib64"))
@@ -289,13 +334,10 @@ if __name__ == "__main__":
             library_dirs.append(Path(efa_home) / "lib")
             libraries.append("efa")
 
-        # DMA-BUF registration avoids nvidia_peermem/efa_nv_peermem.
-        # Set USE_DMABUF=1 to compile with this path.
-        use_dmabuf = int(os.getenv("USE_DMABUF", "0"))
+        # Compile CUDA/MACA DMA-BUF export and ibv_reg_dmabuf_mr support.
+        # UCCL_EP_VERBS_REG selects auto, peermem, or dmabuf at runtime.
         if use_dmabuf:
             print("Building with DMA-BUF GPU memory registration (USE_DMABUF)")
-            cxx_flags.append("-DUSE_DMABUF")
-            nvcc_flags.append("-DUSE_DMABUF")
         else:
             print("Building without DMA-BUF GPU memory registration")
 
@@ -474,10 +516,11 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Build Summary")
     print("=" * 60)
-    print(
-        f" > Platform: {'MACA' if maca_path else 'ROCm' if torch.version.hip else 'CUDA'}"
+    platform_name = (
+        "MetaX MACA" if use_metax else ("ROCm" if torch.version.hip else "CUDA")
     )
-    if torch.version.cuda and not maca_path:
+    print(f" > Platform: {platform_name}")
+    if torch.version.cuda and not use_metax:
         print(f" > Architecture: {arch}")
         if gpu_name:
             print(f" > GPU: {gpu_name}")
@@ -485,6 +528,8 @@ if __name__ == "__main__":
         print(f" > GH200 Support: {'Yes' if has_gh200 else 'No'}")
         print(f" > DMA-BUF Support: {'Yes' if use_dmabuf else 'No'}")
         print(f" > libfabric CXI Support: {'Yes' if use_libfabric_cxi else 'No'}")
+        urma_vendor = "MetaX" if use_metax else "NVIDIA"
+        print(f" > URMA Support: {'Yes (' + urma_vendor + ')' if use_urma else 'No'}")
     print(f" > Device Arch: {device_arch}")
     print(f" > Sources: {len(sources)} files")
     print(f" > Headers (tracked): {len(header_files)} files")
