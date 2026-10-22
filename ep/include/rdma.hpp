@@ -64,6 +64,20 @@ struct RDMAConnectionInfo {
     uint64_t len;
   } mr_chunk_info[kMaxMRChunks];
 #endif
+
+#ifdef USE_URMA
+  // URMA connection blobs — serialized urma_rjetty_t / urma_seg_t objects
+  // exchanged verbatim over the existing TCP bootstrap.
+  static constexpr uint32_t kMaxUrmaBlob = 2048;
+  uint32_t urma_rjetty_len = 0;
+  uint8_t urma_rjetty[kMaxUrmaBlob] = {};
+  uint32_t urma_main_seg_len = 0;
+  uint8_t urma_main_seg[kMaxUrmaBlob] = {};
+  uint32_t urma_atomic_seg_len = 0;
+  uint8_t urma_atomic_seg[kMaxUrmaBlob] = {};
+  uint32_t urma_barrier_seg_len = 0;
+  uint8_t urma_barrier_seg[kMaxUrmaBlob] = {};
+#endif
 };
 
 struct PendingUpdate {

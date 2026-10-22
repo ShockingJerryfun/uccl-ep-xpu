@@ -3,6 +3,7 @@
 
 #include "common.hpp"
 #include "cxi_transport.hpp"
+#include "urma_transport.hpp"
 #include "proxy_ctx.hpp"
 #include "rdma.hpp"
 #include "ring_buffer.cuh"
@@ -107,6 +108,7 @@ class Proxy {
   void init_sender();
   void init_remote();
   bool use_cxi_transport() const;
+  bool use_urma_transport() const;
   bool should_connect_peer(int peer) const;
   void exchange_peer_connection_info(int num_ranks);
 
@@ -119,6 +121,11 @@ class Proxy {
   void poll_cxi_completions();
   CxiTransport* cxi_transport_for_rank(int rank) const;
   uint64_t load_cxi_barrier_word_sum(size_t slot) const;
+  void post_urma_commands(std::vector<uint64_t> const& wrs_to_post,
+                          std::vector<TransferCmd> const& cmds_to_post);
+  void poll_urma_completions();
+  UrmaTransport* urma_transport_for_rank(int rank) const;
+  uint64_t load_urma_barrier_word_sum(size_t slot) const;
   void post_barrier_msg(int dst_rank, bool ack, uint64_t seq);
   void send_barrier(uint64_t wr);
   void barrier_check();
@@ -156,6 +163,10 @@ class Proxy {
   CxiTransport* cxi_transport_ = nullptr;
   std::vector<std::unique_ptr<CxiTransport>> cxi_transports_by_rank_;
   size_t cxi_outstanding_ops_ = 0;
+  bool use_urma_transport_ = false;
+  UrmaTransport* urma_transport_ = nullptr;
+  std::vector<std::unique_ptr<UrmaTransport>> urma_transports_by_rank_;
+  size_t urma_outstanding_ops_ = 0;
   std::vector<TransferCmd> postponed_atomics_;
   std::vector<uint64_t> postponed_wr_ids_;
 
