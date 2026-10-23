@@ -3,10 +3,10 @@
 #include "gpu_platform.hpp"
 #include "transport.hpp"
 #ifdef USE_URMA
-#if __has_include(<ub/umdk/urma/urma_api.h>)
-#include <ub/umdk/urma/urma_api.h>
-#else
+#if __has_include(<urma_api.h>)
 #include <urma_api.h>
+#else
+#include <ub/umdk/urma/urma_api.h>
 #endif
 #endif
 
