@@ -8,7 +8,7 @@ CXXFLAGS := -O3 -std=c++17 $(INCLUDES) -D__MC_PLATFORM_MXCC__ -DDISABLE_SM90_FEA
 CUCCFLAGS := --maca-path=$(MACA_PATH) --gcc-install-dir=$(GCC_INSTALL_DIR) -fno-strict-aliasing -rdc=true
 LDFLAGS := -L$(MACA_PATH)/lib -Wl,-rpath,$(MACA_PATH)/lib -Wl,-rpath-link,$(MACA_PATH)/lib -libverbs -lnuma -lpthread
 
-MACA_BIN := primitive_test d2h_queue_test gpu_to_cpu_bench intranode_combine_test
+MACA_BIN := primitive_test d2h_queue_test gpu_to_cpu_bench intranode_combine_test low_latency_local_test
 
 all: $(MACA_BIN)
 
@@ -26,6 +26,9 @@ gpu_to_cpu_bench: gpu_to_cpu_bench.cu ../../include/util/gpu_rt.h
 
 intranode_combine_test: intranode_combine_test.cu ../src/intranode.cu $(wildcard ../include/*.cuh)
 	$(CUCC) $(CUCCFLAGS) $(CXXFLAGS) $< ../src/intranode.cu -o $@ $(LDFLAGS)
+
+low_latency_local_test: low_latency_local_test.cu ../src/internode_ll.cu $(wildcard ../include/*.cuh) $(wildcard ../include/*.hpp)
+	$(CUCC) $(CUCCFLAGS) $(CXXFLAGS) -Xdevice -D__CUDA_ARCH__=800 -DDISABLE_AGGRESSIVE_PTX_INSTRS $< ../src/internode_ll.cu -o $@ $(LDFLAGS)
 
 clean:
 	rm -f $(MACA_BIN) fifo_maca.o
