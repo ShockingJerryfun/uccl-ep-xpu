@@ -710,8 +710,10 @@ class Buffer {
 
     if (num_nvl_bytes > 0) {
       // Barrier
-      intranode::barrier(barrier_signal_ptrs_gpu, nvl_rank, num_nvl_ranks,
-                         comm_stream);
+      if (num_nvl_ranks > 1) {
+        intranode::barrier(barrier_signal_ptrs_gpu, nvl_rank, num_nvl_ranks,
+                           comm_stream);
+      }
       CUDA_CHECK(cudaDeviceSynchronize());
 
       // Close remote IPC
@@ -2510,7 +2512,7 @@ NB_MODULE(ep, m) {
       .def("start_remote", &UcclProxy::start_remote)
       .def("start_local", &UcclProxy::start_local)
       .def("start_dual", &UcclProxy::start_dual)
-      .def("stop", &UcclProxy::stop)
+      .def("stop", &UcclProxy::stop, nb::arg("free_gpu_buffer") = true)
       .def("get_listen_port", &UcclProxy::get_listen_port)
       .def("get_atomic_buffer_ptr", &UcclProxy::get_atomic_buffer_ptr)
       .def("set_atomic_buffer_ptr", &UcclProxy::set_atomic_buffer_ptr)

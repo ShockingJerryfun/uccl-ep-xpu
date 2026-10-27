@@ -678,7 +678,7 @@ def initialize_uccl(
     return proxies, workers
 
 
-def destroy_uccl(proxies, workers):
+def destroy_uccl(proxies, workers, free_gpu_buffer=True):
     # Use current device or fallback to LOCAL_RANK
     if "LOCAL_RANK" in os.environ:
         device_index = int(os.environ["LOCAL_RANK"])
@@ -693,7 +693,7 @@ def destroy_uccl(proxies, workers):
 
     try:
         for p in proxies:
-            p.stop()
+            p.stop(free_gpu_buffer)
     except Exception:
         pass
     try:

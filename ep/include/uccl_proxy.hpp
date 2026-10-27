@@ -25,7 +25,7 @@ class UcclProxy {
   void start_remote();
   void start_local();
   void start_dual();
-  void stop();
+  void stop(bool free_gpu_buffer = true);
   int get_listen_port() const { return proxy_->get_listen_port(); }
 
   // Set the offset of dispatch_rdma_recv_data_buffer within rdma_buffer
