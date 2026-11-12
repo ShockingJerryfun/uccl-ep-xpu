@@ -169,8 +169,8 @@ __device__ __forceinline__ void st_release_sys_global(dtype_t const* ptr,
 }  // namespace amd
 #elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
 namespace metax {
-__shared__ int barrier_count[MAX_NUM_BARRIERS];
-__shared__ int barrier_phase[MAX_NUM_BARRIERS];
+static __shared__ int barrier_count[MAX_NUM_BARRIERS];
+static __shared__ int barrier_phase[MAX_NUM_BARRIERS];
 }  // namespace metax
 #endif
 
