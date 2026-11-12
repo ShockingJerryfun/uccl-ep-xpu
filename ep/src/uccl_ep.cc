@@ -39,17 +39,6 @@
 #include <vector>
 #include <cuda_runtime.h>
 
-void UcclProxy::calculate_and_set_dispatch_recv_data_offset(
-    int num_tokens, int hidden, int num_experts) {
-  uccl::LowLatencyLayout layout(gpu_buffer_addr_, num_tokens, hidden,
-                                proxy_->cfg_.num_ranks, num_experts);
-  auto const offset = reinterpret_cast<uintptr_t>(
-                          layout.buffers[0].dispatch_rdma_recv_data_buffer) -
-                      reinterpret_cast<uintptr_t>(gpu_buffer_addr_);
-  proxy_->set_dispatch_recv_data_offset(offset);
-  proxy_->cfg_.num_experts = num_experts;
-}
-
 namespace uccl {
 std::map<ProxyRegistryKey, std::vector<nb::object>> g_proxies_by_dev;
 

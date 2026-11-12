@@ -1,5 +1,6 @@
 #pragma once
 #include "bench_utils.hpp"
+#include "ep_config.hpp"
 #include "fifo.hpp"
 #include "proxy.hpp"
 #include "ring_buffer.cuh"
@@ -49,7 +50,15 @@ class UcclProxy {
 
   // num_tokens is the allocated per-rank capacity, not the current batch size.
   void calculate_and_set_dispatch_recv_data_offset(int num_tokens, int hidden,
-                                                   int num_experts);
+                                                   int num_experts) {
+    uccl::LowLatencyLayout layout(gpu_buffer_addr_, num_tokens, hidden,
+                                  proxy_->cfg_.num_ranks, num_experts);
+    auto const offset = reinterpret_cast<uintptr_t>(
+                            layout.buffers[0].dispatch_rdma_recv_data_buffer) -
+                        reinterpret_cast<uintptr_t>(gpu_buffer_addr_);
+    proxy_->set_dispatch_recv_data_offset(offset);
+    proxy_->cfg_.num_experts = num_experts;
+  }
 
   std::vector<uint64_t> get_d2h_channel_addrs() const;
   int thread_idx() const noexcept { return thread_idx_; }
