@@ -1,3 +1,4 @@
+#include "common.hpp"
 #include "ep_config.hpp"
 
 #include <cassert>
