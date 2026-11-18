@@ -1,4 +1,5 @@
 import inspect
+from datetime import timedelta
 from typing import Any, Optional, Tuple, Union
 import os
 import socket
@@ -64,14 +65,21 @@ def init_dist(local_rank: int, num_local_ranks: int):
 
 
 def init_dist_under_torchrun(local_rank: int, num_local_ranks: int):
-    # torchrun already sets RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT
-    dist.init_process_group(
-        backend="nccl", device_id=torch.device(f"cuda:{local_rank}")
-    )
+    # Bind the GPU before constructing the process group. The MetaX/MCCL
+    # environment tested with this benchmark requires lazy communicator setup.
+    lazy_init = os.getenv("UCCL_BENCH_LAZY_INIT", "0")
+    if lazy_init not in ("0", "1"):
+        raise ValueError("UCCL_BENCH_LAZY_INIT must be 0 or 1")
+    torch.cuda.set_device(local_rank)
+    if lazy_init == "1":
+        dist.init_process_group(backend="nccl", timeout=timedelta(seconds=100))
+    else:
+        dist.init_process_group(
+            backend="nccl", device_id=torch.device(f"cuda:{local_rank}")
+        )
 
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device(f"cuda:{local_rank}")
-    torch.cuda.set_device(local_rank)
 
     return (
         dist.get_rank(),
@@ -595,18 +603,6 @@ def initialize_uccl(
     use_normal_mode=False,
     rdma_buffer_is_host_allocated=False,
 ):
-    # Only sweep barriers belonging to OUR mode so we don't stomp on a
-    # coexisting Buffer of the other mode in the same process. The C++
-    # shm name format is `/uccl_barrier_<ip>_uid<uid>_<ht|ll>_th<idx>`,
-    # where `ht` = high-throughput (use_normal_mode=True) and `ll` =
-    # low-latency.
-    try:
-        mode_token = "_ht_" if use_normal_mode else "_ll_"
-        for shm_file in glob.glob(f"/dev/shm/uccl_barrier_*{mode_token}*"):
-            os.remove(shm_file)
-    except Exception:
-        pass
-
     (
         local_rank,
         node_local_rank,
@@ -698,11 +694,6 @@ def destroy_uccl(proxies, workers, free_gpu_buffer=True):
         pass
     try:
         ep.unregister_proxy(device_index)
-    except Exception:
-        pass
-    try:
-        for shm_file in glob.glob("/dev/shm/uccl_barrier_*"):
-            os.remove(shm_file)
     except Exception:
         pass
 

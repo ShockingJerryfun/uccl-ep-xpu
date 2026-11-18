@@ -20,7 +20,7 @@ COMMON_OBJ := ../src/common.o
 
 # Binaries
 CUDA_BIN := pcie_bench gpu_to_cpu_bench batched_gpu_to_cpu_bench
-HOST_TEST_BIN := rdma_addressing_test rdma_registration_test metax_gpu_rt_config_test
+HOST_TEST_BIN := rdma_addressing_test rdma_registration_test metax_gpu_rt_config_test barrier_name_test
 INTRANODE_TEST_BIN := intranode_combine_test
 DEVICE_TEST_BIN := primitive_test d2h_queue_test low_latency_local_test
 
@@ -64,10 +64,15 @@ rdma_registration_test: rdma_registration_test.cpp ../include/rdma_registration.
 metax_gpu_rt_config_test: metax_gpu_rt_config_test.cpp ../../include/util/gpu_rt.h
 	$(CXX) $(HOST_TEST_CXXFLAGS) -DUSE_METAX -Iurma_support -I../../include $< -o $@
 
+barrier_name_test: barrier_name_test.cpp ../include/local_barrier_name.hpp
+	$(CXX) $(HOST_TEST_CXXFLAGS) $< -o $@ $(if $(filter Linux,$(shell uname -s)),-lrt,)
+
 test: $(HOST_TEST_BIN)
 	./rdma_addressing_test
 	./rdma_registration_test
 	./metax_gpu_rt_config_test
+	./barrier_name_test
+	python3 bench_init_test.py ../bench/utils.py
 
 clean:
 	rm -f $(CUDA_BIN) $(HOST_TEST_BIN) $(INTRANODE_TEST_BIN) $(DEVICE_TEST_BIN) urma_gpu_smoke urma_metax_gpu_smoke $(COMMON_OBJ) fifo_cuda.o

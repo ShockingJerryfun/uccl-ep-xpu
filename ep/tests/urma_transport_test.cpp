@@ -1,7 +1,9 @@
 // Hardware-independent integration tests: real UMDK types + production
 // transport.
 #include "urma_transport.hpp"
+#include "gpu_p2p_runtime.hpp"
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <iostream>
@@ -10,6 +12,9 @@
 #include <stdexcept>
 #include <cuda.h>
 #include <cuda_runtime_api.h>
+#ifdef USE_METAX
+#include <dlfcn.h>
+#endif
 
 namespace {
 int resources = 0, init_count = 0, gpu_regs = 0, posts = 0;
@@ -59,6 +64,7 @@ cudaError_t cudaPointerGetAttributes(cudaPointerAttributes* a, void const* p) {
   return 1;
 }
 int gpu_frees = 0, host_frees = 0;
+void* last_host_freed = nullptr;
 cudaError_t cudaMalloc(void** ptr, std::size_t) {
   static std::uint64_t storage[16];
   *ptr = storage;
@@ -84,8 +90,9 @@ cudaError_t cudaFree(void*) {
   assert(gpu_regs == 0);
   return 0;
 }
-cudaError_t cudaFreeHost(void*) {
+cudaError_t cudaFreeHost(void* ptr) {
   ++host_frees;
+  last_host_freed = ptr;
   return 0;
 }
 char const* cudaGetErrorString(cudaError_t) { return "test CUDA error"; }
@@ -158,6 +165,9 @@ urma_target_seg_t* urma_register_seg(urma_context_t* c, urma_seg_cfg_t* cfg) {
   if (!cfg->token_id || !cfg->flag.bs.token_id_valid) return nullptr;
   bool gpu = gpu_ptrs.count(reinterpret_cast<void*>(cfg->va));
   if (gpu != bool(cfg->is_gpu_seg) || cfg->flag.bs.non_pin) return nullptr;
+  // Model the tested UMDK requirement for host registrations, including
+  // the transport's operand and barrier buffers.
+  if (!gpu && cfg->va % 4096 != 0) return nullptr;
 #ifndef USE_METAX
   if (gpu && !sync_ptrs.count(reinterpret_cast<void*>(cfg->va))) return nullptr;
 #endif
@@ -205,7 +215,11 @@ urma_status_t urma_post_jetty_send_wr(urma_jetty_t* j, urma_jfs_wr_t* w,
                                       urma_jfs_wr_t**) {
   if (fail_post) return URMA_EINVAL;
   ++posts;
-  assert(w->flag.bs.place_order == URMA_STRONG_ORDER);
+  auto const* order = std::getenv("UCCL_URMA_WRITE_ORDER");
+  bool const relaxed_write = w->opcode == URMA_OPC_WRITE && order &&
+                             std::strcmp(order, "relax") == 0;
+  assert(w->flag.bs.place_order ==
+         (relaxed_write ? URMA_RELAX_ORDER : URMA_STRONG_ORDER));
   if (w->opcode == URMA_OPC_WRITE) {
     std::memcpy(reinterpret_cast<void*>(w->rw.dst.sge->addr),
                 reinterpret_cast<void*>(w->rw.src.sge->addr),
@@ -234,6 +248,40 @@ int urma_poll_jfc(urma_jfc_t* j, int max, urma_cr_t* out) {
 }
 int main() {
   ProxyCtx ctx;
+  auto const* order = std::getenv("UCCL_URMA_WRITE_ORDER");
+  if (order && *order && std::strcmp(order, "strong") != 0 &&
+      std::strcmp(order, "relax") != 0) {
+    UrmaTransport invalid;
+    rejects([&] { invalid.init(ctx); });
+    assert(resources == 0 && init_count == 0);
+    std::cout << "Invalid URMA WRITE ordering rejected before initialization\n";
+    return 0;
+  }
+#ifdef USE_METAX
+  auto const* setting = std::getenv("UCCL_METAX_URMA_HOST_ATOMICS");
+  if (setting && std::strcmp(setting, "1") == 0) {
+    alignas(4096) std::uint8_t storage[8192]{};
+    void* const allocation_base = storage;
+    void* const registered = storage + 4096;
+    host_ptrs.insert(registered);
+    auto lease = UrmaTransport::acquire_buffer_ownership(
+        registered, true, 2, allocation_base);
+    UrmaTransport first, last;
+    first.init(ctx);
+    last.init(ctx);
+    rejects([&] { first.register_atomic_buffer(storage + 4096 + 8, 64, 2); });
+    first.register_atomic_buffer(registered, 64, 2);
+    last.register_atomic_buffer(registered, 64, 2);
+    first.destroy();
+    lease.reset();
+    assert(host_frees == 0 && gpu_regs == 0);
+    last.destroy();
+    assert(host_frees == 1 && last_host_freed == allocation_base);
+    assert(resources == 0 && init_count == 0 && gpu_regs == 0);
+    std::cout << "URMA mapped host control lifetime passed (simulated hardware)\n";
+    return 0;
+  }
+#endif
   // Failure before a context exists must release global initialization
   // ownership.
   fail_context = true;
@@ -378,6 +426,54 @@ int main() {
     assert(gpu_frees == 2);
 #endif
   }
+  // A registered address can be an aligned interior pointer. Shared leases
+  // must retain and free the original host allocation, exactly once.
+  {
+    std::uint8_t backing[128]{};
+    void* const base = backing;
+    void* const interior = backing + 32;
+    int const before = host_frees;
+    auto first = UrmaTransport::acquire_buffer_ownership(interior, true, 2, base);
+    auto second = UrmaTransport::acquire_buffer_ownership(interior, true, 2, base);
+    rejects([&] {
+      UrmaTransport::acquire_buffer_ownership(interior, true, 2, backing + 8);
+    });
+    first.reset();
+    assert(host_frees == before);
+    second.reset();
+    assert(host_frees == before + 1 && last_host_freed == base);
+  }
+#ifdef USE_METAX
+  // GPU registrations may also expose an aligned address inside mcMalloc.
+  // The final owner must call mcFree once, with the original allocation.
+  {
+    void* const base = uccl::gpu_p2p::allocate_device(16384, 2);
+    auto raw = reinterpret_cast<std::uintptr_t>(base);
+    auto aligned = (raw + 8191) & ~static_cast<std::uintptr_t>(8191);
+    if (aligned == raw) aligned += 8192;
+    void* const registered = reinterpret_cast<void*>(aligned);
+    gpu_ptrs.insert(registered);
+    void* const library = dlopen(std::getenv("UCCL_METAX_RUNTIME_LIB"), RTLD_LAZY);
+    assert(library != nullptr);
+    auto free_calls = reinterpret_cast<int (*)()>(dlsym(library, "mcTestFreeCalls"));
+    auto last_free = reinterpret_cast<void* (*)()>(dlsym(library, "mcTestLastFree"));
+    assert(free_calls != nullptr && last_free != nullptr);
+    int const before = free_calls();
+    auto lease = UrmaTransport::acquire_buffer_ownership(registered, false, 2, base);
+    UrmaTransport first, last;
+    first.init(ctx);
+    last.init(ctx);
+    first.register_main_buffer(registered, 64, 2);
+    last.register_main_buffer(registered, 64, 2);
+    first.destroy();
+    lease.reset();
+    assert(free_calls() == before);
+    last.destroy();
+    assert(free_calls() == before + 1 && last_free() == base);
+    gpu_ptrs.erase(registered);
+    assert(dlclose(library) == 0);
+  }
+#endif
   fail_register = true;
   {
     UrmaTransport t;
