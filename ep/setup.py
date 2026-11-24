@@ -219,6 +219,10 @@ if __name__ == "__main__":
         cxx_flags.extend(metax_flags)
         cxx_flags.append("-fno-strict-aliasing")
         nvcc_flags.extend(metax_flags)
+        # MACA FP8 headers require half comparisons disabled by PyTorch flags.
+        nvcc_flags.extend(
+            ["-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__"]
+        )
         if sys.platform.startswith("linux"):
             libraries.append("dl")
     if use_urma:
@@ -273,6 +277,7 @@ if __name__ == "__main__":
         extra_link_args.extend(
             [f"-Wl,-rpath,{maca_path}/lib", f"-Wl,-rpath-link,{maca_path}/lib"]
         )
+        extra_link_args.extend([f"-B{gcc_install_dir}/", f"-L{gcc_install_dir}"])
     elif torch.version.cuda:
         libraries.append("cuda")
         # Add CUDA library directory to library_dirs
