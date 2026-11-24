@@ -2,6 +2,19 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
+#ifdef USE_METAX
+#include <cuda_runtime_api.h>
+
+int test_host_frees = 0;
+cudaError_t cudaFreeHost(void* ptr) {
+  ++test_host_frees;
+  std::free(ptr);
+  return cudaSuccess;
+}
+#endif
 #include <stdexcept>
 #include <vector>
 
@@ -24,7 +37,18 @@ int main() {
 #ifdef USE_METAX
   assert(vendor() == Vendor::MetaX);
   assert(registration_alignment() == 4096);
-  assert(atomic_buffer_is_gpu_memory());
+  auto const* setting = std::getenv("UCCL_METAX_URMA_HOST_ATOMICS");
+  bool const host_atomics = setting && std::strcmp(setting, "1") == 0;
+  assert(atomic_buffer_is_gpu_memory() == !host_atomics);
+  if (host_atomics) {
+    auto* mapped = static_cast<std::uint8_t*>(std::malloc(64));
+    assert(mapped != nullptr);
+    std::memset(mapped, 0xff, 64);
+    zero_memory(mapped, 64, MemoryKind::HostMapped, 1);
+    for (int i = 0; i < 64; ++i) assert(mapped[i] == 0);
+    release_memory(mapped, MemoryKind::HostMapped, 1);
+    assert(test_host_frees == 1);
+  }
 
   set_device(1);
   void* ptr = allocate_device(8192, 1);

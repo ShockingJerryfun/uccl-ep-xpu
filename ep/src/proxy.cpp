@@ -1,4 +1,5 @@
 #include "proxy.hpp"
+#include "local_barrier_name.hpp"
 #include "ep_backend.hpp"
 #include "bench_utils.hpp"
 #include "d2h_queue_host.hpp"
@@ -45,9 +46,18 @@ static std::string shm_name_for_barrier(std::string const& ip,
   // distinct barrier namespaces; otherwise their proxy threads (sharing
   // thread_idx 0..N-1) would collide on /dev/shm and corrupt each other's
   // LocalBarrier counters.
-  uid_t uid = getuid();
-  return "/uccl_barrier_" + ip + "_uid" + std::to_string(uid) +
-         (use_normal_mode ? "_ht" : "_ll") + "_th" + std::to_string(thread_idx);
+  // Snapshot the rendezvous identity so creation and teardown use the same
+  // name even if the process environment changes later.
+  static std::string const master_addr = [] {
+    auto const* value = std::getenv("MASTER_ADDR");
+    return value ? std::string(value) : std::string();
+  }();
+  static std::string const master_port = [] {
+    auto const* value = std::getenv("MASTER_PORT");
+    return value ? std::string(value) : std::string();
+  }();
+  return local_barrier_shm_name(ip, use_normal_mode, thread_idx, getuid(),
+                                master_addr, master_port);
 }
 
 LocalBarrier* map_local_barrier_shm(std::string const& name, bool* out_owner) {

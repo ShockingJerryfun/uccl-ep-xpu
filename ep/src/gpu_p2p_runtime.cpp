@@ -12,6 +12,7 @@
 
 #ifdef USE_METAX
 #include <dlfcn.h>
+#include <cuda_runtime_api.h>
 #else
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -158,7 +159,13 @@ std::size_t registration_alignment() {
 
 bool atomic_buffer_is_gpu_memory() {
 #ifdef USE_METAX
-  return true;
+  // Snapshot the setting once so allocation, registration and reset agree
+  // throughout the lifetime of an active transport.
+  static bool const use_host = [] {
+    auto const* value = std::getenv("UCCL_METAX_URMA_HOST_ATOMICS");
+    return value && std::strcmp(value, "1") == 0;
+  }();
+  return !use_host;
 #else
   return false;
 #endif
@@ -298,9 +305,14 @@ void prepare_atomic_buffer(void* ptr, std::size_t bytes, int device) {
 void release_memory(void* ptr, MemoryKind kind, int device) {
   if (!ptr) return;
 #ifdef USE_METAX
-  if (kind != MemoryKind::Device)
-    throw std::invalid_argument("MetaX URMA owns device allocations only");
   set_device(device);
+  if (kind == MemoryKind::HostMapped) {
+    auto const rc = cudaFreeHost(ptr);
+    if (rc != cudaSuccess)
+      throw std::runtime_error("cudaFreeHost failed: rc=" +
+                               std::to_string(static_cast<int>(rc)));
+    return;
+  }
   check_mc(metax().free(ptr), "mcFree");
   std::lock_guard<std::mutex> lock(g_allocations_mutex);
   g_allocations.erase(ptr);

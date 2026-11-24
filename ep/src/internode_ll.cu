@@ -255,6 +255,17 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
       sync_barrier_1(num_threads);
 
       // Issue IBGDA sends
+#if (defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)) && \
+    !defined(PER_EXPERT_BATCHING)
+      // MetaX has 16 warps per block and dedicates the last to counting.
+      // Reuse an existing sender warp for destinations beyond the first 15.
+      // Every warp still participates once in the token-copy barrier above.
+      for (int topk_pos = warp_id; topk_pos < num_topk;
+           topk_pos += num_warps - 1) {
+        if (topk_pos != warp_id)
+          dst_expert_idx = static_cast<int>(
+              __ldg(topk_idx + token_idx * num_topk + topk_pos));
+#endif
       if (dst_expert_idx >= 0) {
         int slot_idx =
             lane_id == 0
@@ -318,6 +329,10 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                            atomic_finish_counter_per_expert + dst_expert_idx, 1)
                      : 0;
       }
+#if (defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)) && \
+    !defined(PER_EXPERT_BATCHING)
+      }
+#endif
     }
   } else if (warp_id == num_warps - 1) {
     // NOTE(MaoZiming): These checks are ibgda specific.
@@ -695,7 +710,12 @@ void dispatch(void* packed_recv_x, void* packed_recv_x_scales,
   int const num_warp_groups = ceil_div(num_experts, num_device_sms);
   int const num_warps_per_group = kNumMaxWarpGroups / num_warp_groups;
   EP_HOST_ASSERT(num_warp_groups > 0 and num_warps_per_group > 0);
+#if (defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)) && \
+    !defined(PER_EXPERT_BATCHING)
+  EP_HOST_ASSERT(num_warp_groups * num_warps_per_group > 1);
+#else
   EP_HOST_ASSERT(num_topk + 1 <= num_warp_groups * num_warps_per_group);
+#endif
 
   auto const num_warps = num_warp_groups * num_warps_per_group;
   auto const num_sms = ceil_div(num_experts, num_warp_groups);

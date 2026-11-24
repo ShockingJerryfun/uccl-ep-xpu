@@ -50,7 +50,7 @@ uint64_t UrmaTransport::load_barrier_word(size_t) const { unavailable(); }
 int UrmaTransport::poll(TransportCompletion*, int) { unavailable(); }
 void UrmaTransport::destroy() {}
 std::shared_ptr<void> UrmaTransport::acquire_buffer_ownership(void*, bool,
-                                                              int) {
+                                                              int, void*) {
   unavailable();
 }
 #else  // USE_URMA
@@ -123,6 +123,13 @@ urma_transport_mode_t urma_trans_mode_from_env() {
   }
   return URMA_TM_RC;
 }
+urma_place_order_t urma_write_order_from_env() {
+  char const* order = std::getenv("UCCL_URMA_WRITE_ORDER");
+  if (!order || !*order || std::strcmp(order, "strong") == 0)
+    return URMA_STRONG_ORDER;
+  if (std::strcmp(order, "relax") == 0) return URMA_RELAX_ORDER;
+  throw std::runtime_error("UCCL_URMA_WRITE_ORDER must be strong or relax");
+}
 void check_range(uint64_t offset, uint64_t bytes, uint64_t length) {
   if (offset > length || bytes > length - offset)
     throw std::out_of_range("URMA operation exceeds registered segment");
@@ -152,6 +159,10 @@ void UrmaTransport::unavailable() {
 void UrmaTransport::init(ProxyCtx& ctx) {
   if (init_acquired_) throw std::logic_error("URMA already initialized");
   (void)urma_trans_mode_from_env();
+  write_order_ = urma_write_order_from_env();
+  std::fprintf(stderr, "[URMA] rank=%d thread=%d write_order=%s\n",
+               ctx.local_rank, ctx.thread_idx,
+               write_order_ == URMA_RELAX_ORDER ? "relax" : "strong");
   ctx_ = &ctx;
   try {
     {
@@ -299,19 +310,22 @@ void UrmaTransport::init(ProxyCtx& ctx) {
 }
 std::shared_ptr<void> UrmaTransport::acquire_buffer_ownership(void* ptr,
                                                               bool host,
-                                                              int gpu_device) {
+                                                              int gpu_device,
+                                                              void* allocation_base) {
   if (!ptr || (!host && gpu_device < 0))
     throw std::invalid_argument("invalid URMA allocation ownership");
   std::lock_guard<std::mutex> lock(g_resource_mutex);
   auto allocation = g_allocations[ptr].lock();
   if (!allocation) {
     allocation = std::make_shared<UrmaAllocation>();
-    allocation->ptr = ptr;
     g_allocations[ptr] = allocation;
   }
   if (allocation->owned &&
-      (allocation->host != host || allocation->gpu_device != gpu_device))
+      (allocation->host != host || allocation->gpu_device != gpu_device ||
+       (allocation_base && allocation->ptr != allocation_base)))
     throw std::logic_error("conflicting URMA allocation ownership");
+  if (!allocation->owned)
+    allocation->ptr = allocation_base ? allocation_base : ptr;
   allocation->owned = true;
   allocation->host = host;
   allocation->gpu_device = gpu_device;
@@ -522,7 +536,10 @@ void UrmaTransport::post_write(int dst_rank, uint64_t wr_id,
   urma_jfs_wr_t wr = {};
   wr.opcode = URMA_OPC_WRITE;
   wr.flag.bs.complete_enable = 1;
-  wr.flag.bs.place_order = URMA_STRONG_ORDER;
+  // Relax is opt-in: its writes may reorder with each other. Validate the
+  // following notification's ordering and GPU visibility for the actual
+  // Jetty and device before using it in a workload.
+  wr.flag.bs.place_order = write_order_;
   wr.tjetty = p.tjetty;
   wr.user_ctx = reinterpret_cast<uint64_t>(&op);
   wr.rw.src.sge = &src_sge;
