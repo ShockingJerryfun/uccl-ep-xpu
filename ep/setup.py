@@ -217,6 +217,7 @@ if __name__ == "__main__":
             "-DDISABLE_AGGRESSIVE_PTX_INSTRS",
         ]
         cxx_flags.extend(metax_flags)
+        cxx_flags.append("-fno-strict-aliasing")
         nvcc_flags.extend(metax_flags)
         if sys.platform.startswith("linux"):
             libraries.append("dl")
@@ -246,12 +247,21 @@ if __name__ == "__main__":
     maca_path = str(_maca_path) if use_metax else None
     if use_metax:
         device_arch = os.environ["CUCC_TARGETS"]
+        gcc_install_dir = Path(
+            subprocess.check_output(
+                ["g++", "-print-libgcc-file-name"], text=True
+            ).strip()
+        ).parent
         os.environ["PYTORCH_NVCC"] = str(
             Path(maca_path) / "tools" / "cu-bridge" / "bin" / "cucc"
         )
         os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0"
         nvcc_flags.extend(
             [
+                f"--maca-path={maca_path}",
+                f"--gcc-install-dir={gcc_install_dir}",
+                "-Xdevice",
+                "-D__CUDA_ARCH__=800",
                 "-rdc=true",
                 "-fno-strict-aliasing",
             ]

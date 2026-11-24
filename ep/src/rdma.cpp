@@ -59,21 +59,30 @@
 
 namespace {
 
-gpuMemGetHandleForAddressRange_fn dmabuf_export_function() {
+auto dmabuf_export_function() {
+#ifdef USE_METAX
+  static int (*function)(void const*, size_t, int*, uint64_t*) = nullptr;
+#else
   static gpuMemGetHandleForAddressRange_fn function = nullptr;
+#endif
   static std::once_flag init_flag;
   std::call_once(init_flag, []() {
-    void* handle = nullptr;
 #ifdef USE_METAX
-    if (char const* runtime = getenv("UCCL_METAX_RUNTIME_LIB"))
-      handle = dlopen(runtime, RTLD_LAZY | RTLD_LOCAL);
-#endif
-    if (!handle)
-      handle = dlopen(GPU_DRIVER_LIB_NAME, RTLD_LAZY | RTLD_LOCAL);
+    char const* prefix = getenv("MACA_MXC_PATH");
+    std::string const path =
+        std::string(prefix ? prefix : "") + GPU_DRIVER_LIB_NAME;
+    void* handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+#else
+    void* handle = dlopen(GPU_DRIVER_LIB_NAME, RTLD_LAZY | RTLD_LOCAL);
     if (!handle)
       handle = dlopen(GPU_DRIVER_LIB_NAME_FALLBACK, RTLD_LAZY | RTLD_LOCAL);
+#endif
     if (handle) {
-      function = reinterpret_cast<gpuMemGetHandleForAddressRange_fn>(
+#ifdef USE_METAX
+      auto init = reinterpret_cast<int (*)()>(dlsym(handle, "mxc_init"));
+      if (!init || init() != 0) return;
+#endif
+      function = reinterpret_cast<decltype(function)>(
           dlsym(handle, GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME));
     }
   });
@@ -97,6 +106,11 @@ bool export_gpu_dmabuf(void* gpu_buf, size_t bytes, DmabufExport& out) {
     return false;
   }
 
+  uint64_t offset = 0;
+#ifdef USE_METAX
+  uccl::rdma::DmabufExportRange const range{
+      reinterpret_cast<uintptr_t>(gpu_buf), bytes, 0};
+#else
   void* allocation_base_ptr = nullptr;
   size_t allocation_size = 0;
   gpuError_t range_status =
@@ -124,11 +138,17 @@ bool export_gpu_dmabuf(void* gpu_buf, size_t bytes, DmabufExport& out) {
     fprintf(stderr, "[RDMA] invalid DMA-BUF export range: %s\n", error.what());
     return false;
   }
+  offset = range.fd_offset;
+#endif
 
   int fd = -1;
+#ifdef USE_METAX
+  int const status = export_function(gpu_buf, bytes, &fd, &offset);
+#else
   gpuDriverResult_t const status = export_function(
       &fd, (gpuDevicePtr_t)range.export_base, range.export_size,
       GPU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+#endif
   if (status != gpuDriverSuccess || fd < 0) {
     fprintf(stderr,
             "[RDMA] %s failed (error=%d, request=%p/%zu, export=%p/%zu)\n",
@@ -140,7 +160,7 @@ bool export_gpu_dmabuf(void* gpu_buf, size_t bytes, DmabufExport& out) {
   }
 
   out.fd = fd;
-  out.offset = range.fd_offset;
+  out.offset = offset;
   out.base = range.export_base;
   out.size = range.export_size;
   return true;

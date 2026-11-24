@@ -183,7 +183,11 @@ void cached_notify_dispatch(int const* rank_prefix_matrix, int num_memset_int,
 
 template <int kNumRanks, int kNumThreads, int kNumTMABytesPerWarp,
           bool kUseAggressiveAtomic>
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+__global__ void __launch_bounds__(kNumThreads)
+#else
 __global__ void __launch_bounds__(kNumThreads, 1)
+#endif
     dispatch(int4* recv_x, float* recv_x_scales, int* recv_src_idx,
              int64_t* recv_topk_idx, float* recv_topk_weights,
              int* recv_channel_offset, int* send_head, int4 const* x,
@@ -730,7 +734,11 @@ void cached_notify_combine(void** buffer_ptrs, int* send_head, int num_channels,
 
 template <typename dtype_t, int kNumRanks, int kNumThreads,
           int kNumTMABytesPerWarp, bool kUseAggressiveAtomic>
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+__global__ void __launch_bounds__(kNumThreads)
+#else
 __global__ void __launch_bounds__(kNumThreads, 1)
+#endif
     combine(dtype_t* recv_x, float* recv_topk_weights, dtype_t const* x,
             float const* topk_weights, dtype_t const* bias_0,
             dtype_t const* bias_1, int const* src_idx,

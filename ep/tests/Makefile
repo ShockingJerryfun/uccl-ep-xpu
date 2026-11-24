@@ -22,7 +22,7 @@ COMMON_OBJ := ../src/common.o
 CUDA_BIN := pcie_bench gpu_to_cpu_bench batched_gpu_to_cpu_bench
 HOST_TEST_BIN := rdma_addressing_test rdma_registration_test metax_gpu_rt_config_test
 INTRANODE_TEST_BIN := intranode_combine_test
-DEVICE_TEST_BIN := primitive_test d2h_queue_test
+DEVICE_TEST_BIN := primitive_test d2h_queue_test low_latency_local_test
 
 all: $(CUDA_BIN)
 
@@ -51,6 +51,9 @@ fifo_cuda.o: ../src/fifo.cpp ../include/fifo.hpp ../include/fifo_device.hpp ../i
 
 d2h_queue_test: d2h_queue_test.cu fifo_cuda.o $(wildcard ../include/*.cuh) $(wildcard ../include/*.hpp)
 	$(NVCC) $(CUDAFLAGS) $(CXXFLAGS) $< fifo_cuda.o -o $@ $(LDFLAGS) -lnuma
+
+low_latency_local_test: low_latency_local_test.cu ../src/internode_ll.cu $(wildcard ../include/*.cuh) $(wildcard ../include/*.hpp)
+	$(NVCC) $(CUDAFLAGS) $(CXXFLAGS) --expt-relaxed-constexpr -DDISABLE_AGGRESSIVE_PTX_INSTRS $< ../src/internode_ll.cu -o $@ $(LDFLAGS)
 
 rdma_addressing_test: rdma_addressing_test.cpp ../include/rdma_addressing.hpp
 	$(CXX) $(HOST_TEST_CXXFLAGS) $< -o $@

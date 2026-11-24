@@ -524,8 +524,13 @@ template <bool kLowLatencyMode, int kNumRDMARanks, bool kCachedMode,
           int kNumTMABytesPerWarp, int kNumDispatchRDMASenderWarps,
           bool kUseAggressiveAtomic,
           int kNumTopkRDMARanks = get_num_topk_rdma_ranks(kNumRDMARanks)>
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+__global__ void __launch_bounds__(
+    ((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE))
+#else
 __global__ void __launch_bounds__(
     ((kNumDispatchRDMASenderWarps + 1 + NUM_MAX_NVL_PEERS) * WARP_SIZE), 1)
+#endif
     dispatch(int4* recv_x, float* recv_x_scales, int64_t* recv_topk_idx,
              float* recv_topk_weights, SourceMeta* recv_src_meta, int4 const* x,
              float const* x_scales, int64_t const* topk_idx,
@@ -1890,10 +1895,10 @@ __global__ void cached_notify(
         constexpr int num_bytes_per_token = sizeof(int) * NUM_MAX_NVL_PEERS;
         constexpr int num_tokens_per_batch =
             tma_batch_size / num_bytes_per_token;
+#if defined(__NVCC__) && !defined(DISABLE_SM90_FEATURES)
         EP_STATIC_ASSERT(num_bytes_per_token % 16 == 0,
                          "num_bytes_per_token should be divisible by 16");
 
-#if defined(__NVCC__) && !defined(DISABLE_SM90_FEATURES)
         // TMA stuffs
         extern __shared__ __align__(1024) uint8_t smem_tma_buffer[];
         auto tma_buffer = smem_tma_buffer + warp_id * kNumTMABytesPerWarp;
@@ -2247,8 +2252,9 @@ template <
                                     : 1,
     int kNumForwarders = kNumRDMARanks* kNumWarpsPerForwarder,
     int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
-    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+#if defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+__global__ void __launch_bounds__(kNumForwarders* WARP_SIZE)
+#elif defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
 __global__ void __launch_bounds__(kNumForwarders* WARP_SIZE, 1)
 #else
 __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
