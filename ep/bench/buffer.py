@@ -355,7 +355,7 @@ class Buffer:
         for proxy in self.proxies:
             proxy.notify_proxy_thread_adaptive_sleeper()
             proxy.calculate_and_set_dispatch_recv_data_offset(
-                num_tokens=x.shape[0],
+                num_tokens=num_max_dispatch_tokens_per_rank,
                 hidden=x.shape[1],
                 num_experts=num_experts,
             )

@@ -1,5 +1,6 @@
 #pragma once
 #include "bench_utils.hpp"
+#include "ep_config.hpp"
 #include "fifo.hpp"
 #include "proxy.hpp"
 #include "ring_buffer.cuh"
@@ -47,25 +48,15 @@ class UcclProxy {
     proxy_->set_atomic_buffer_ptr(atomic_buffer_ptr_);
   }
 
-  // Calculate and set dispatch_recv_data_offset automatically based on layout
-  // parameters
+  // num_tokens is the allocated per-rank capacity, not the current batch size.
   void calculate_and_set_dispatch_recv_data_offset(int num_tokens, int hidden,
                                                    int num_experts) {
-    // Calculate layout parameters (same logic as ep_config.hpp and test)
-    int num_scales = hidden / 128;
-    size_t num_bytes_per_dispatch_msg =
-        4 + std::max(hidden * 2, hidden + num_scales * 4);
-    size_t dispatch_send_buffer_bytes = num_tokens * num_bytes_per_dispatch_msg;
-    size_t combine_send_buffer_bytes =
-        num_experts * num_tokens * hidden * 2;  // sizeof(bfloat16)
-    size_t send_buffer_bytes =
-        std::max(dispatch_send_buffer_bytes, combine_send_buffer_bytes);
-    size_t dispatch_recv_count_buffer_bytes = num_experts * 4;
-    size_t signaling_buffer_bytes_aligned =
-        ((dispatch_recv_count_buffer_bytes + 127) / 128) * 128;
-    uintptr_t dispatch_recv_data_offset =
-        signaling_buffer_bytes_aligned * 2 + send_buffer_bytes * 2;
-    proxy_->set_dispatch_recv_data_offset(dispatch_recv_data_offset);
+    uccl::LowLatencyLayout layout(gpu_buffer_addr_, num_tokens, hidden,
+                                  proxy_->cfg_.num_ranks, num_experts);
+    auto const offset = reinterpret_cast<uintptr_t>(
+                            layout.buffers[0].dispatch_rdma_recv_data_buffer) -
+                        reinterpret_cast<uintptr_t>(gpu_buffer_addr_);
+    proxy_->set_dispatch_recv_data_offset(offset);
     proxy_->cfg_.num_experts = num_experts;
   }
 

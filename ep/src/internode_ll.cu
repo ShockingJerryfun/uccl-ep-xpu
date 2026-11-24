@@ -5,6 +5,7 @@
 #include "ep_util.hpp"
 #include "ep_utils.cuh"
 #include "internode_ll.cuh"
+#include "ll_stride.hpp"
 #include "uccl_ibgda.cuh"
 #include <iostream>
 #include <vector>
@@ -116,6 +117,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
                               : (kHidden * sizeof(nv_bfloat16)));
   size_t const num_int4_per_msg = num_bytes_per_msg / sizeof(int4);
   EP_DEVICE_ASSERT(num_bytes_per_msg % sizeof(int4) == 0);
+  size_t const num_bytes_per_send_msg = ll_dispatch_send_stride(num_bytes_per_msg);
 
   // Expert counts
   __shared__ int shared_num_tokens_sent_per_expert[kNumMaxWarpGroups];
@@ -158,7 +160,7 @@ __global__ __launch_bounds__(1024, 1) void dispatch(
       auto const x_int4 =
           static_cast<int4 const*>(x) + token_idx * hidden_bf16_int4;
       auto const rdma_x_src_idx = reinterpret_cast<int*>(
-          static_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_msg);
+          static_cast<uint8_t*>(rdma_x) + token_idx * num_bytes_per_send_msg);
       auto const rdma_x_vec = reinterpret_cast<vec_t*>(
           reinterpret_cast<uint8_t*>(rdma_x_src_idx) + sizeof(int4));
       auto const rdma_x_scales = reinterpret_cast<float*>(
