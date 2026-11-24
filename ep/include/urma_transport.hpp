@@ -1,15 +1,25 @@
 #pragma once
 
+#include "gpu_platform.hpp"
 #include "transport.hpp"
 #ifdef USE_URMA
+#if __has_include(<ub/umdk/urma/urma_api.h>)
 #include <ub/umdk/urma/urma_api.h>
+#else
+#include <urma_api.h>
+#endif
 #endif
 
 #include <cstddef>
 #include <cstdint>
 #include <list>
+#include <memory>
 #include <stdexcept>
 #include <vector>
+
+#ifdef USE_URMA
+struct UrmaRegistration;
+#endif
 
 // URMA-based transport for UCCL-EP.
 //
@@ -26,9 +36,11 @@ class UrmaTransport final : public EpTransport {
  public:
   UrmaTransport() = default;
   ~UrmaTransport() override;
+  UrmaTransport(UrmaTransport const&) = delete;
+  UrmaTransport& operator=(UrmaTransport const&) = delete;
   void init(ProxyCtx& ctx) override;
-  void register_main_buffer(void* ptr, size_t len, int cuda_device) override;
-  void register_atomic_buffer(void* ptr, size_t len, int cuda_device) override;
+  void register_main_buffer(void* ptr, size_t len, int gpu_device) override;
+  void register_atomic_buffer(void* ptr, size_t len, int gpu_device) override;
   LocalConnInfo local_info() const override;
   void connect_peer(int peer, RemoteConnInfo const& remote) override;
   void post_write(int dst_rank, uint64_t wr_id, uint64_t local_offset,
@@ -46,10 +58,25 @@ class UrmaTransport final : public EpTransport {
   uint64_t load_barrier_word(size_t slot) const;
   int poll(TransportCompletion* out, int max) override;
   void destroy() override;
+  // Share GPU-allocation ownership with every registration of this pointer.
+  // The returned lease keeps the allocation alive; the final lease or
+  // registration releases it after unregistering the segment.
+  static std::shared_ptr<void> acquire_buffer_ownership(void* ptr, bool host,
+                                                        int gpu_device);
+
  private:
   [[noreturn]] static void unavailable();
 #ifdef USE_URMA
   ProxyCtx* ctx_ = nullptr;
+  bool init_acquired_ = false;
+  bool bound_ = false;
+  bool failed_ = false;
+  std::shared_ptr<urma_context_t> context_owner_;
+  std::vector<std::shared_ptr<UrmaRegistration>> registrations_;
+  urma_target_seg_t* register_segment(void* ptr, size_t len, bool gpu,
+                                      bool atomic);
+  void drain();
+  void submit(urma_jfs_wr_t& wr);
   urma_context_t* urma_ctx_ = nullptr;
   urma_jfce_t* jfce_ = nullptr;
   urma_jfc_t* jfc_ = nullptr;
