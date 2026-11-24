@@ -20,8 +20,12 @@ with tempfile.TemporaryDirectory(prefix='uccl-urma-test-') as tmp:
 #include <cstring>
 #include <set>
 static std::set<void*> allocations;
+static int free_calls = 0;
+static void* last_free = nullptr;
 extern "C" int mcSetDevice(int device) { return device >= 0 ? 0 : 1; }
 extern "C" int mcGetDeviceCount(int* count) { *count = 8; return 0; }
+extern "C" int mcTestFreeCalls() { return free_calls; }
+extern "C" void* mcTestLastFree() { return last_free; }
 extern "C" int mcMalloc(void** ptr, size_t bytes) {
     if (bytes == 0 || bytes % 4096 != 0) return 1;
     *ptr = std::malloc(bytes);
@@ -29,6 +33,8 @@ extern "C" int mcMalloc(void** ptr, size_t bytes) {
     return *ptr ? 0 : 1;
 }
 extern "C" int mcFree(void* ptr) {
+    ++free_calls;
+    last_free = ptr;
     if (allocations.erase(ptr)) std::free(ptr);
     return 0;
 }
@@ -60,7 +66,12 @@ extern "C" int mcMemcpy(void* dst, void const* src, size_t bytes, int) {
         cmd += [str(ep / 'tests/urma_transport_test.cpp'), '-o', str(tmp / 'test')]
     subprocess.run(cmd, check=True)
     if not a.syntax_only:
-        subprocess.run([str(tmp / 'test')], check=True)
+        for setting in (None, 'strong', 'relax', 'invalid'):
+            env = dict(os.environ)
+            env.pop('UCCL_URMA_WRITE_ORDER', None)
+            if setting is not None:
+                env['UCCL_URMA_WRITE_ORDER'] = setting
+            subprocess.run([str(tmp / 'test')], check=True, env=env)
 
     metax_cmd = [os.environ.get('CXX', 'c++'), '-std=c++17', '-pthread',
                  '-Wall', '-Wextra', '-Werror', '-DUSE_URMA',
@@ -79,16 +90,26 @@ extern "C" int mcMemcpy(void* dst, void const* src, size_t bytes, int) {
                         '-o', str(metax_test)], check=True)
         metax_env = dict(os.environ,
                          UCCL_METAX_RUNTIME_LIB=str(fake_metax_lib))
-        subprocess.run([str(metax_test)], check=True, env=metax_env)
+        metax_env.pop('UCCL_METAX_URMA_HOST_ATOMICS', None)
+        metax_env.pop('UCCL_URMA_WRITE_ORDER', None)
+        for setting in (None, 'strong', 'relax', 'invalid'):
+            env = dict(metax_env)
+            if setting is not None:
+                env['UCCL_URMA_WRITE_ORDER'] = setting
+            subprocess.run([str(metax_test)], check=True, env=env)
+        host_env = dict(metax_env, UCCL_METAX_URMA_HOST_ATOMICS='1')
+        subprocess.run([str(metax_test)], check=True, env=host_env)
 
         runtime_test = tmp / 'metax_runtime_test'
         subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17',
                         '-Wall', '-Wextra', '-Werror', '-DUSE_METAX',
                         '-I' + str(ep / 'include'),
+                        '-I' + str(ep / 'tests/urma_support'),
                         str(ep / 'src/gpu_p2p_runtime.cpp'),
                         str(ep / 'tests/gpu_p2p_runtime_test.cpp'),
                         '-o', str(runtime_test)], check=True)
         subprocess.run([str(runtime_test)], check=True, env=metax_env)
+        subprocess.run([str(runtime_test)], check=True, env=host_env)
 
     for defines in ([], ['-DUSE_URMA'],
                     ['-DUSE_URMA', '-DUSE_METAX'],

@@ -48,9 +48,10 @@ bash build.sh roc7 ep --install
 ## Build on MetaX MACA
 
 The MetaX port targets cu-bridge and 64-lane GPUs. SDK interface probes compiled
-with MACA 3.7.0.38 on C500/AArch64; the complete extension and communication
-benchmarks have not been validated. Install the matching vendor PyTorch build,
-Ninja, nanobind and the existing verbs, libnl and NUMA development dependencies.
+with MACA 3.7.0.38 on C500/AArch64, and a private two-node C500 integration build
+has passed the benchmark cases described below. Other devices and deployments
+still require validation. Install the matching vendor PyTorch build, Ninja,
+nanobind and the existing verbs, libnl and NUMA development dependencies.
 The vendor PyTorch build must support cucc: the sampled SDK has no `nvcc` entry,
 and upstream PyTorch's version check still requires it even with `PYTORCH_NVCC`.
 
@@ -78,8 +79,17 @@ and set `UCCL_EP_TRANSPORT=urma` when running. Set `UMDK_HOME`, or
 transport requires `urma_seg_cfg_t.is_gpu_seg` and matching GPU-memory support
 in the UDMA driver. Both nodes must use the same build and descriptor ABI.
 EP payload and notification buffers retain the MetaX fine-grained allocation;
-the transport owns their registration and release. Full MetaX/URMA benchmark
-execution remains unvalidated.
+the transport owns their registration and release. Earlier private builds on
+two C500 nodes passed LL and Normal benchmark correctness checks with GPU P2P
+UMDK and PCIe AtomicOp requester enablement. The combined code in this branch
+requires its own two-node validation; those results do not establish support
+for other devices, configurations, or full-model inference.
+
+URMA WRITE requests default to strong ordering. `UCCL_URMA_WRITE_ORDER=relax`
+opts into relaxed WRITE ordering while FADD and barrier requests remain strong.
+Relaxed writes may reorder with each other. Validate the ordering and GPU
+visibility of each WRITE followed by notification for the actual Jetty, device,
+and workload before enabling this option.
 
 For verbs/RDMA with DMA-BUF, build with
 `USE_METAX=1 USE_DMABUF=1 python setup.py install` and set
@@ -201,6 +211,7 @@ Notes:
 | UCCL_EP_ENABLE_AGGRESSIVE_ATOMIC | Use relaxed atomics with manual `s_waitcnt vmcnt(0)` fences instead of acquire/release semantics. Required on AMD CDNA so the combine receiver actually sees the producer's tail-pointer updates over XGMI; without it the kernel deadlocks at scale. | 1 on AMD, 0 on CUDA |
 | UCCL_EP_DISABLE_CPU_AFFINITY | Skip proxy-thread CPU pinning; inherit parent process affinity | 0 |
 | UCCL_RDMA_ADAPTIVE_SLEEP | Enable adaptive sleeping on proxy threads, by putting the proxy threads into a sleeping state if there have been no new work requests / RDMA completion events after 120s. | null |
+| UCCL_URMA_WRITE_ORDER | URMA WRITE ordering: `strong` or explicitly opt in to `relax`; FADD and barrier remain strong. | strong |
 | UCCL_UDP_SPORT_BASE | Base UDP source port for RoCEv2 QPs on mlx5 devices. Valid range: 1-65535. | 0 (driver decides) |
 
 ## Results

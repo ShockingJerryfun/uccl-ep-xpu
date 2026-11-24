@@ -3,6 +3,7 @@
 #include "gpu_platform.hpp"
 #include "transport.hpp"
 #ifdef USE_URMA
+#include "urma_host_page_allocator.hpp"
 #if __has_include(<urma_api.h>)
 #include <urma_api.h>
 #else
@@ -61,8 +62,10 @@ class UrmaTransport final : public EpTransport {
   // Share GPU-allocation ownership with every registration of this pointer.
   // The returned lease keeps the allocation alive; the final lease or
   // registration releases it after unregistering the segment.
-  static std::shared_ptr<void> acquire_buffer_ownership(void* ptr, bool host,
-                                                        int gpu_device);
+  // An aligned registration address may be inside a larger allocation. In
+  // that case, allocation_base is the pointer that must eventually be freed.
+  static std::shared_ptr<void> acquire_buffer_ownership(
+      void* ptr, bool host, int gpu_device, void* allocation_base = nullptr);
 
  private:
   [[noreturn]] static void unavailable();
@@ -71,6 +74,7 @@ class UrmaTransport final : public EpTransport {
   bool init_acquired_ = false;
   bool bound_ = false;
   bool failed_ = false;
+  urma_place_order_t write_order_ = URMA_STRONG_ORDER;
   std::shared_ptr<urma_context_t> context_owner_;
   std::vector<std::shared_ptr<UrmaRegistration>> registrations_;
   urma_target_seg_t* register_segment(void* ptr, size_t len, bool gpu,
@@ -90,11 +94,11 @@ class UrmaTransport final : public EpTransport {
   urma_target_seg_t* main_tseg_ = nullptr;
   urma_target_seg_t* atomic_tseg_ = nullptr;
   // Scratch buffer receiving the "old value" writeback of FADD ops.
-  std::vector<uint64_t> atomic_operands_;
+  std::vector<uint64_t, UrmaHostPageAllocator<uint64_t>> atomic_operands_;
   std::vector<uint8_t> atomic_operand_used_;
   urma_target_seg_t* operand_tseg_ = nullptr;
   // Locally-owned barrier words; remote peers FADD into them.
-  std::vector<uint64_t> barrier_words_;
+  std::vector<uint64_t, UrmaHostPageAllocator<uint64_t>> barrier_words_;
   urma_target_seg_t* barrier_tseg_ = nullptr;
   LocalConnInfo local_info_{};
   // Per-peer imported objects.

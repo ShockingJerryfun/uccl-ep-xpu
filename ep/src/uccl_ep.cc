@@ -1636,7 +1636,9 @@ class Buffer {
                                  device_index);
       if (atomic_buffer_ptr != nullptr)
         uccl::gpu_p2p::zero_memory(atomic_buffer_ptr, kAtomicBufferSize,
-                                   uccl::gpu_p2p::MemoryKind::Device,
+                                   uccl::gpu_p2p::atomic_buffer_is_gpu_memory()
+                                       ? uccl::gpu_p2p::MemoryKind::Device
+                                       : uccl::gpu_p2p::MemoryKind::HostMapped,
                                    device_index);
       return;
     }
