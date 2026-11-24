@@ -124,6 +124,7 @@ class Proxy {
   void post_urma_commands(std::vector<uint64_t> const& wrs_to_post,
                           std::vector<TransferCmd> const& cmds_to_post);
   void poll_urma_completions();
+  void ensure_urma_capacity(size_t count);
   UrmaTransport* urma_transport_for_rank(int rank) const;
   uint64_t load_urma_barrier_word_sum(size_t slot) const;
   void post_barrier_msg(int dst_rank, bool ack, uint64_t seq);
@@ -163,7 +164,9 @@ class Proxy {
   CxiTransport* cxi_transport_ = nullptr;
   std::vector<std::unique_ptr<CxiTransport>> cxi_transports_by_rank_;
   size_t cxi_outstanding_ops_ = 0;
+  uint64_t urma_last_barrier_sent_ = 0;
   bool use_urma_transport_ = false;
+  std::shared_ptr<void> urma_main_allocation_;
   UrmaTransport* urma_transport_ = nullptr;
   std::vector<std::unique_ptr<UrmaTransport>> urma_transports_by_rank_;
   size_t urma_outstanding_ops_ = 0;

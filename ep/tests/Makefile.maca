@@ -3,7 +3,7 @@ CUCC := $(MACA_PATH)/tools/cu-bridge/bin/cucc
 CXX := g++
 GCC_INSTALL_DIR := $(dir $(shell $(CXX) -print-libgcc-file-name))
 
-INCLUDES := -I../include -I../../include -I$(MACA_PATH)/include -I$(MACA_PATH)/tools/cu-bridge/include
+INCLUDES := -I../include -I../../include -I$(MACA_PATH)/include -I$(MACA_PATH)/include/mcr -I$(MACA_PATH)/tools/cu-bridge/include
 CXXFLAGS := -O3 -std=c++17 $(INCLUDES) -D__MC_PLATFORM_MXCC__ -DDISABLE_SM90_FEATURES
 CUCCFLAGS := --maca-path=$(MACA_PATH) --gcc-install-dir=$(GCC_INSTALL_DIR) -fno-strict-aliasing -rdc=true
 LDFLAGS := -L$(MACA_PATH)/lib -Wl,-rpath,$(MACA_PATH)/lib -Wl,-rpath-link,$(MACA_PATH)/lib -libverbs -lnuma -lpthread

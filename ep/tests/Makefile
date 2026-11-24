@@ -20,7 +20,7 @@ COMMON_OBJ := ../src/common.o
 
 # Binaries
 CUDA_BIN := pcie_bench gpu_to_cpu_bench batched_gpu_to_cpu_bench
-HOST_TEST_BIN := rdma_addressing_test
+HOST_TEST_BIN := rdma_addressing_test rdma_registration_test metax_gpu_rt_config_test
 INTRANODE_TEST_BIN := intranode_combine_test
 DEVICE_TEST_BIN := primitive_test d2h_queue_test
 
@@ -52,13 +52,34 @@ fifo_cuda.o: ../src/fifo.cpp ../include/fifo.hpp ../include/fifo_device.hpp ../i
 d2h_queue_test: d2h_queue_test.cu fifo_cuda.o $(wildcard ../include/*.cuh) $(wildcard ../include/*.hpp)
 	$(NVCC) $(CUDAFLAGS) $(CXXFLAGS) $< fifo_cuda.o -o $@ $(LDFLAGS) -lnuma
 
-$(HOST_TEST_BIN): rdma_addressing_test.cpp ../include/rdma_addressing.hpp
+rdma_addressing_test: rdma_addressing_test.cpp ../include/rdma_addressing.hpp
 	$(CXX) $(HOST_TEST_CXXFLAGS) $< -o $@
 
+rdma_registration_test: rdma_registration_test.cpp ../include/rdma_registration.hpp
+	$(CXX) $(HOST_TEST_CXXFLAGS) $< -o $@
+
+metax_gpu_rt_config_test: metax_gpu_rt_config_test.cpp ../../include/util/gpu_rt.h
+	$(CXX) $(HOST_TEST_CXXFLAGS) -DUSE_METAX -Iurma_support -I../../include $< -o $@
+
 test: $(HOST_TEST_BIN)
-	./$(HOST_TEST_BIN)
+	./rdma_addressing_test
+	./rdma_registration_test
+	./metax_gpu_rt_config_test
 
 clean:
-	rm -f $(CUDA_BIN) $(HOST_TEST_BIN) $(INTRANODE_TEST_BIN) $(DEVICE_TEST_BIN) $(COMMON_OBJ) fifo_cuda.o
+	rm -f $(CUDA_BIN) $(HOST_TEST_BIN) $(INTRANODE_TEST_BIN) $(DEVICE_TEST_BIN) urma_gpu_smoke urma_metax_gpu_smoke $(COMMON_OBJ) fifo_cuda.o
 
 .PHONY: all clean test
+
+# Target-machine test: real CUDA, real UMDK, production transport, no test shim.
+UMDK_HOME ?= /usr/local/umdk
+URMA_INCLUDE_DIR ?= $(UMDK_HOME)/include
+URMA_LIBRARY_DIR ?= $(UMDK_HOME)/lib64
+URMA_SMOKE_FLAGS := -std=c++17 -DUSE_URMA -I../include -I../../include -I$(URMA_INCLUDE_DIR) -I$(CUDA_HOME)/include
+urma_gpu_smoke: urma_gpu_smoke.cu ../src/urma_transport.cpp ../src/gpu_p2p_runtime.cpp ../include/urma_transport.hpp ../include/gpu_p2p_runtime.hpp
+	$(NVCC) $(CUDAFLAGS) $(URMA_SMOKE_FLAGS) -Xcompiler=-pthread urma_gpu_smoke.cu ../src/urma_transport.cpp ../src/gpu_p2p_runtime.cpp -o $@ -L$(URMA_LIBRARY_DIR) -L$(CUDA_HOME)/lib64 -lurma -lcuda -lcudart -libverbs
+
+# Target-machine test: MetaX MACA runtime is loaded dynamically.
+URMA_METAX_SMOKE_FLAGS := -std=c++17 -pthread -DUSE_URMA -DUSE_METAX -I../include -I../../include -I$(URMA_INCLUDE_DIR)
+urma_metax_gpu_smoke: urma_metax_gpu_smoke.cpp ../src/urma_transport.cpp ../src/gpu_p2p_runtime.cpp ../include/urma_transport.hpp ../include/gpu_p2p_runtime.hpp
+	$(CXX) $(URMA_METAX_SMOKE_FLAGS) urma_metax_gpu_smoke.cpp ../src/urma_transport.cpp ../src/gpu_p2p_runtime.cpp -o $@ -L$(URMA_LIBRARY_DIR) -lurma -libverbs -ldl

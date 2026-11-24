@@ -327,10 +327,10 @@ __device__ static __forceinline__ void nvshmemi_ibgda_quiet(
       "num_d2h_channel_addrs must be multiple of kChannelPerProxy");
   EP_DEVICE_ASSERT(num_d2h_channel_addrs % kChannelPerProxy == 0);
   EP_DEVICE_ASSERT(num_d2h_channel_addrs / kChannelPerProxy == kNumProxyThs);
-  // First, atomically commit QUIET to all CXI rings. Each proxy thread owns
+  // First, atomically commit QUIET to all CXI/URMA rings. Each proxy thread owns
   // multiple D2H rings, so posting to one ring per proxy is not enough to fence
   // sibling rings before RDMA buffer reuse.
-#if defined(USE_LIBFABRIC_CXI)
+#if defined(USE_LIBFABRIC_CXI) || defined(USE_URMA)
   constexpr int kQuietStride = 1;
   constexpr int kMaxQuietPosts = kNumProxyThs * kChannelPerProxy;
 #else
