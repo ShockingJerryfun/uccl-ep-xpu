@@ -479,7 +479,8 @@ void notify_dispatch(
   }                                                                            \
   break
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   constexpr int kNumThreads = MAX_NTHREADS;
 #else
   constexpr int kNumThreads = 512;
@@ -647,7 +648,8 @@ __global__ void __launch_bounds__(
   // RDMA sender warp synchronization
   // NOTES: `rdma_send_channel_tail` means the latest released tail
   // NOTES: `rdma_send_channel_window` means the ongoing 32 transactions' status
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   __shared__ int volatile rdma_send_next_token_idx;
   __shared__ int volatile rdma_send_channel_next_tail[kNumRDMARanks];
   __shared__ int volatile rdma_send_channel_tail[kNumRDMARanks];
@@ -660,6 +662,12 @@ __global__ void __launch_bounds__(
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   for (int i = thread_id; i < MAX_NUM_BARRIERS; i += num_threads)
     amd::barrier_init(i);
+  __syncthreads();
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  for (int i = thread_id; i < MAX_NUM_BARRIERS; i += blockDim.x) {
+    metax::barrier_count[i] = 0;
+    metax::barrier_phase[i] = 0;
+  }
   __syncthreads();
 #endif
 
@@ -700,7 +708,8 @@ __global__ void __launch_bounds__(
     get_channel_task_range(num_tokens, num_channels, channel_id,
                            token_start_idx, token_end_idx);
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     (warp_id == 0 and lane_id == 0)
         ? (rdma_send_next_token_idx = token_start_idx)
         : 0;
@@ -775,8 +784,8 @@ __global__ void __launch_bounds__(
                            ? rdma_channel_data.recv_buffer(lane_id)
                            : rdma_channel_data.send_buffer(lane_id);
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-    // NOTE: sequential lock works for amd.
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     int last_rdma_tail_idx = -1;
     for (token_idx = token_start_idx + warp_id; token_idx < token_end_idx;
          token_idx += kNumDispatchRDMASenderWarps) {
@@ -1004,7 +1013,8 @@ __global__ void __launch_bounds__(
       __syncwarp();
     }
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     // Epilogue
     // Acquire sequential lock
     while (lane_id == 0 and rdma_send_next_token_idx != token_idx)
@@ -1028,7 +1038,8 @@ __global__ void __launch_bounds__(
     // Clean shared memory
     EP_STATIC_ASSERT(kNumRDMARanks <= WARP_SIZE,
                      "Invalid number of RDMA ranks");
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     (lane_id < kNumRDMARanks) ? (rdma_send_channel_next_tail[lane_id] = 0) : 0;
 #else
     (lane_id < kNumRDMARanks) ? (rdma_send_channel_lock[lane_id] = 0) : 0;
@@ -1368,7 +1379,8 @@ __global__ void __launch_bounds__(
             nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
 
         // Copy data
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
         UNROLLED_WARP_COPY(5, lane_id, num_bytes_per_token / sizeof(int4),
                            reinterpret_cast<int4*>(dst_shifted),
                            reinterpret_cast<int4*>(shifted), ld_nc_global,
@@ -1567,7 +1579,8 @@ __global__ void __launch_bounds__(
         auto tma_load_bytes = hidden_bytes + (scale_aligned ? scale_bytes : 0);
 
         // Copy data
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
         UNROLLED_WARP_COPY(
             5, lane_id, hidden_int4,
             reinterpret_cast<int4*>(recv_x + recv_token_idx * hidden_int4),
@@ -1820,7 +1833,8 @@ __global__ void cached_notify(
     EP_DEVICE_ASSERT(num_rdma_ranks <= WARP_SIZE);
 
     // Iterate in reverse order
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     // NOTE(zhuang12): for support channel numbers >= WARP_SIZE, we need to
     // iterate over the channels in a warp-wise manner
     int remain_warp_id = warp_id;
@@ -1847,7 +1861,8 @@ __global__ void cached_notify(
           }
         }
       }
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     }
 #endif
 
@@ -1861,7 +1876,8 @@ __global__ void cached_notify(
                      rdma_rank_prefix_sum != nullptr);
     EP_STATIC_ASSERT(NUM_MAX_NVL_PEERS <= WARP_SIZE, "Too many NVL peers");
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     // NOTE(zhuang12): for support channel numbers >= WARP_SIZE, we need to
     // iterate over the channels in a warp-wise manner
     int remain_warp_id = warp_id;
@@ -1933,7 +1949,8 @@ __global__ void cached_notify(
             for (int token_idx = batch_end_idx - 1;
                  token_idx >= batch_start_idx; --token_idx) {
               if (lane_id < NUM_MAX_NVL_PEERS) {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
                 auto current_head =
                     __ldg(combined_nvl_head + token_idx * NUM_MAX_NVL_PEERS +
                           lane_id);
@@ -1973,7 +1990,8 @@ __global__ void cached_notify(
           }
         }
       }
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
     }
 #endif
   }
@@ -1991,7 +2009,8 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx,
                    bool is_cached_dispatch, bool low_latency_mode,
                    uint64_t const* d2h_channel_addrs, int num_d2h_channel_addrs,
                    void* atomic_buffer_ptr) {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   int const num_threads =
       std::max(128, std::min(WARP_SIZE * num_channels, MAX_NTHREADS));
 #else
@@ -2002,7 +2021,8 @@ void cached_notify(int hidden_int4, int num_scales, int num_topk_idx,
   int const kNumTMABytesPerWarp = 8192;
   int const smem_size = kNumTMABytesPerWarp * num_warps;
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   EP_HOST_ASSERT(num_warps * WARP_SIZE <= MAX_NTHREADS);
 #endif
 
@@ -2227,7 +2247,8 @@ template <
                                     : 1,
     int kNumForwarders = kNumRDMARanks* kNumWarpsPerForwarder,
     int kNumRDMAReceivers = kNumForwarders - NUM_MAX_NVL_PEERS>
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
 __global__ void __launch_bounds__(kNumForwarders* WARP_SIZE, 1)
 #else
 __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
@@ -2295,7 +2316,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
   auto warp_role = role_meta.first;
   auto warp_id = role_meta.second;
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   EP_DEVICE_ASSERT(num_warps == kNumForwarders);
 #else
   EP_DEVICE_ASSERT(num_warps == kNumForwarders + 1);
@@ -2307,6 +2329,12 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   for (int i = thread_id; i < MAX_NUM_BARRIERS; i += num_threads)
     amd::barrier_init(i);
+  __syncthreads();
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  for (int i = thread_id; i < MAX_NUM_BARRIERS; i += blockDim.x) {
+    metax::barrier_count[i] = 0;
+    metax::barrier_phase[i] = 0;
+  }
   __syncthreads();
 #endif
 
@@ -2444,7 +2472,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
               nvl_channel_x.buffer() + dst_slot_idx * num_bytes_per_token;
           auto shifted_x = x + token_idx * hidden_int4;
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
           // Copy data
           UNROLLED_WARP_COPY(5, lane_id, hidden_int4,
                              reinterpret_cast<int4*>(shifted_x_buffers),
@@ -2546,14 +2575,16 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
     __shared__ bool volatile rdma_receiver_retired[kNumRDMAReceivers];
 
     auto sync_forwarder_smem = [=]() {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
       sync_barrier(0, kNumForwarders * WARP_SIZE);
 #else
       sync_barrier(0, (kNumForwarders + 1) * WARP_SIZE);
 #endif
     };
     auto sync_rdma_receiver_smem = [=]() {
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
       sync_barrier_1(kNumRDMAReceivers * WARP_SIZE);
 #else
       sync_barrier_1((kNumRDMAReceivers + 1) * WARP_SIZE);
@@ -2565,7 +2596,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
       // NOTES: this part is using "large warps" for each RDMA ranks
       auto const dst_rdma_rank = warp_id / kNumWarpsPerForwarder;
       auto const sub_warp_id = warp_id % kNumWarpsPerForwarder;
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
       // Receiver with Coordinator
       auto const num_warps_per_rdma_rank = kNumForwarders / kNumRDMARanks;
       int last_nvl_head[kNumRDMARanks] = {0};
@@ -2642,9 +2674,9 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
       lane_id < NUM_MAX_NVL_PEERS ? (forwarder_nvl_head[warp_id][lane_id] = 0)
                                   : 0;
       lane_id == 0 ? (forwarder_retired[warp_id] = false) : false;
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
-      // no need to sync_forwarder_smem for AMD GPUs, because no coordinator
-      // warp anymore
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+      // Forwarder warps also perform the coordinator work.
 #else
       sync_forwarder_smem();
 #endif
@@ -2714,7 +2746,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
                 : (forwarder_nvl_head[warp_id][lane_id] = expected_head);
           }
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
           // Coordinator
           __threadfence_block();
           if (sub_warp_id == 0) forwarder_coordinator();
@@ -2758,7 +2791,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
                 topk_idx);
           };
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
           // combine_token not use tma
           uint32_t dummy_tma_phases[2];
           combine_token<NUM_MAX_NVL_PEERS, false, dtype_t, NUM_MAX_NVL_PEERS,
@@ -2787,7 +2821,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
                 ? (forwarder_nvl_head[warp_id][lane_id] = -expected_head - 1)
                 : (forwarder_nvl_head[warp_id][lane_id] = expected_head + 1);
         }
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
         if (sub_warp_id == 0) forwarder_coordinator();
 #endif
         sync_large_warp();
@@ -2859,7 +2894,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
                               : 0;
       lane_id == 0 ? (rdma_receiver_retired[warp_id] = false) : 0;
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
       int last_rdma_head = 0;
       auto receiver_corordinator = [&]() {
         int dst_rdma_rank = lane_id < kNumRDMARanks ? lane_id : 0;
@@ -2910,7 +2946,8 @@ __global__ void __launch_bounds__((kNumForwarders + 1) * WARP_SIZE, 1)
               ? (rdma_receiver_rdma_head[warp_id][lane_id] = -expected_head - 1)
               : (rdma_receiver_rdma_head[warp_id][lane_id] = expected_head);
         }
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
         if (warp_id == 0) receiver_corordinator();
 #endif
 
@@ -3109,10 +3146,10 @@ void combine(cudaDataType_t type, void* combined_x,
   EP_HOST_ASSERT(num_max_rdma_chunked_send_tokens >= num_warps_per_forwarder);
   EP_HOST_ASSERT(type == CUDA_R_16BF);
 
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__) || \
+    defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   EP_HOST_ASSERT(num_forwarder_warps * WARP_SIZE <= MAX_NTHREADS);
-  // 16 warps is the maximum number of warps that can be launched on AMD GPUs
-  // MI300-MI355.
+  // The coordinator shares a forwarder warp to stay within the thread limit.
   SETUP_LAUNCH_CONFIG(num_channels * 2, num_forwarder_warps * WARP_SIZE,
                       stream);
 #else

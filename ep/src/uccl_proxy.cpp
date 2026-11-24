@@ -77,6 +77,10 @@ UcclProxy::UcclProxy(int thread_idx, uintptr_t gpu_buffer_addr,
     hipExtMallocWithFlags(&atomic_buffer_ptr_, kAtomicBufferSize,
                           hipDeviceMallocUncached);
     atomic_buffer_is_host_allocated_ = false;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+    mcExtMallocWithFlags(&atomic_buffer_ptr_, kAtomicBufferSize,
+                         mcDeviceMallocFinegrained);
+    atomic_buffer_is_host_allocated_ = false;
 #elif defined(EFA)
     // EFA: atomic buffer is always pinned host memory (cudaHostAlloc).
     cudaHostAlloc(&atomic_buffer_ptr_, kAtomicBufferSize,

@@ -287,6 +287,10 @@ std::tuple<nb::object, bool> allocate_rdma_buffer_dlpack(
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   CUDA_CHECK(hipExtMallocWithFlags(&ptr, alloc_bytes, hipDeviceMallocUncached));
   CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+  CUDA_CHECK(
+      mcExtMallocWithFlags(&ptr, alloc_bytes, mcDeviceMallocFinegrained));
+  CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
 #elif defined(EFA) || defined(USE_DMABUF)
   CUDA_CHECK(cudaMalloc(&ptr, alloc_bytes));
   CUDA_CHECK(cudaMemset(ptr, 0, alloc_bytes));
@@ -337,6 +341,8 @@ bool is_sm90_compiled() {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
   // disable sm90 features for HIP to avoid tma stuffs, but AMD supports fp8
   // features
+  return true;
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
   return true;
 #elif !defined(DISABLE_SM90_FEATURES)
   return true;
@@ -493,6 +499,9 @@ class Buffer {
       // aggressive atomic will work with malloc with uncached memory
       CUDA_CHECK(hipExtMallocWithFlags(&buffer_ptrs[nvl_rank], total_bytes,
                                        hipDeviceMallocUncached));
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+      CUDA_CHECK(mcExtMallocWithFlags(&buffer_ptrs[nvl_rank], total_bytes,
+                                      mcDeviceMallocFinegrained));
 #else
       CUDA_CHECK(cudaMalloc(&buffer_ptrs[nvl_rank], total_bytes));
 #endif
@@ -517,6 +526,9 @@ class Buffer {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
     CUDA_CHECK(hipExtMallocWithFlags(&workspace, NUM_WORKSPACE_BYTES,
                                      hipDeviceMallocUncached));
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+    CUDA_CHECK(mcExtMallocWithFlags(&workspace, NUM_WORKSPACE_BYTES,
+                                    mcDeviceMallocFinegrained));
 #else
     CUDA_CHECK(cudaMalloc(&workspace, NUM_WORKSPACE_BYTES));
 #endif

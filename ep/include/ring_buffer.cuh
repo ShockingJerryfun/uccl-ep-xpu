@@ -161,7 +161,10 @@ enum class FlowDirection { HostToDevice, DeviceToHost, HostToHost };
 #endif
 
 __device__ __forceinline__ uint64_t ld_volatile(uint64_t* ptr) {
-#if defined(__CUDA_ARCH__)
+#if defined(__CUDA_ARCH__) && \
+    (defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
+  return __builtin_nontemporal_load(ptr);
+#elif defined(__CUDA_ARCH__)
   uint64_t ans;
   asm volatile("ld.volatile.global.u64 %0, [%1];"
                : "=l"(ans)

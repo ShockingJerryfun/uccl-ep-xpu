@@ -128,7 +128,8 @@ struct FifoDeviceHandle {
 
     ProxyTrigger* triggerPtr = &(triggers[prevHead % size]);
 
-#if defined(MSCCLPP_DEVICE_CUDA)
+#if defined(MSCCLPP_DEVICE_CUDA) && \
+    !(defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__))
 #if __CUDA_ARCH__ == 800
     // This is faster than release for A100.
     __threadfence_system();

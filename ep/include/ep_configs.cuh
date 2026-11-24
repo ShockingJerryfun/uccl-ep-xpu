@@ -77,6 +77,14 @@ typedef uint16_t __hip_fp8x2_storage_t;
 #define MAX_GROUPS_MASK 0xf
 #define MAX_NUM_BARRIERS 24
 
+#elif defined(__MC_PLATFORM_MXCC__) || defined(__MCC__) || defined(__MXCC__)
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+#define WARP_SIZE 64
+#define WARP_MASK 0xffffffffffffffffu
+#define MAX_NTHREADS 1024
+#define MAX_NUM_BARRIERS 24
+
 #else
 #include <cuda_bf16.h>
 #define WARP_SIZE 32
@@ -84,9 +92,9 @@ typedef uint16_t __hip_fp8x2_storage_t;
 #ifndef DISABLE_SM90_FEATURES
 #include <cuda_fp8.h>
 #else
-// Ampere does not support FP8 features, but CUDA 13+ always provides the
-// header.
-#if __CUDACC_VER_MAJOR__ >= 13
+// Ampere does not support FP8 features, but toolkits that ship the header may
+// include it transitively (e.g. CUDA 12.9 libcu++), so stubs would clash.
+#if __has_include(<cuda_fp8.h>)
 #include <cuda_fp8.h>
 #else
 #define __NV_E4M3 0
