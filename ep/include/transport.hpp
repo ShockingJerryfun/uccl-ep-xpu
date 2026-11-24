@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-enum class TransportKind { Verbs, Cxi };
+enum class TransportKind { Verbs, Cxi, Urma };
 
 using LocalConnInfo = RDMAConnectionInfo;
 using RemoteConnInfo = RDMAConnectionInfo;
