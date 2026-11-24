@@ -81,6 +81,17 @@ EP payload and notification buffers retain the MetaX fine-grained allocation;
 the transport owns their registration and release. Full MetaX/URMA benchmark
 execution remains unvalidated.
 
+For verbs/RDMA with DMA-BUF, build with
+`USE_METAX=1 USE_DMABUF=1 python setup.py install` and set
+`UCCL_EP_TRANSPORT=verbs UCCL_EP_VERBS_REG=dmabuf` when running. The exporter
+loads `libmxc-runtime64.so.1` from the SDK's `MACA_MXC_PATH` prefix (including
+its trailing slash), or the dynamic linker's search path when unset. It calls
+`mxc_init()` and `mxc_vendor_portable_export_dmabuf()` and passes the returned
+offset to `ibv_reg_dmabuf_mr()`, following the
+[MCCL implementation](https://github.com/MetaX-MACA/mccl-nccl/blob/2.20.5/src/transport/net.cc#L845-L850).
+The SDK probe registered 64 KiB of ordinary and fine-grained C500 memory;
+project-buffer registration and cross-node transfers still require validation.
+
 Standalone tests can be compiled without PyTorch:
 
 ```bash

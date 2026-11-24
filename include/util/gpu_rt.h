@@ -185,10 +185,10 @@ inline gpuError_t gpuMemGetAddressRange(void** base_ptr, size_t* size,
 #ifdef USE_METAX
 // MACA cu-bridge maps the CUDA runtime surface used by UCCL kernels, while
 // DMA-BUF export is resolved from the native MACA runtime.
-#define GPU_DRIVER_LIB_NAME "libmcruntime.so"
-#define GPU_DRIVER_LIB_NAME_FALLBACK "libmcruntime.so.1"
+#define GPU_DRIVER_LIB_NAME "libmxc-runtime64.so.1"
+#define GPU_DRIVER_LIB_NAME_FALLBACK "libmxc-runtime64.so.1"
 #define GPU_DRIVER_GET_HANDLE_FOR_ADDRESS_RANGE_NAME \
-  "mcMemGetHandleForAddressRange"
+  "mxc_vendor_portable_export_dmabuf"
 #else
 #define GPU_DRIVER_LIB_NAME "libcuda.so.1"
 #define GPU_DRIVER_LIB_NAME_FALLBACK "libcuda.so"

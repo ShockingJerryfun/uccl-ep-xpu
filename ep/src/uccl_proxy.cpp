@@ -188,7 +188,7 @@ void UcclProxy::start_remote() { start(Mode::Remote); }
 void UcclProxy::start_local() { start(Mode::Local); }
 void UcclProxy::start_dual() { start(Mode::Dual); }
 
-void UcclProxy::stop() {
+void UcclProxy::stop(bool free_gpu_buffer) {
   if (!running_.load(std::memory_order_acquire)) {
     throw std::runtime_error("Proxy already stopped");
   }
@@ -197,7 +197,7 @@ void UcclProxy::stop() {
   running_.store(false, std::memory_order_release);
   // Because proxies share the gpu_buffer, only destroy gpu_buffer for the first
   // proxy.
-  proxy_->destroy(thread_idx_ == 0);
+  proxy_->destroy(free_gpu_buffer && thread_idx_ == 0);
 }
 
 void UcclProxy::start(Mode m) {

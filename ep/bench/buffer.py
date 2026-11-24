@@ -255,7 +255,7 @@ class Buffer:
 
         self.runtime.destroy()
         self.runtime = None
-        destroy_uccl(self.proxies, self.workers)
+        destroy_uccl(self.proxies, self.workers, free_gpu_buffer=False)
 
     @staticmethod
     def is_sm90_compiled():
